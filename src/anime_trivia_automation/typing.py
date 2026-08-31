@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import TypingConfig
+from .config import ReadinessConfig, TypingConfig
 from .models import AnswerTask
 from .utils import sanitize_answer
 
@@ -113,18 +113,35 @@ class ActivePromptState:
         self._condition = threading.Condition()
         self._signature: str | None = None
         self._uncertain = False
+        self._readiness = "unknown"
+        self._generation = 0
 
-    def update(self, signature: str | None) -> None:
+    def update(
+        self,
+        signature: str | None,
+        readiness: str = "unknown",
+        generation: int | None = None,
+    ) -> bool:
         with self._condition:
+            next_generation = self._generation if generation is None else generation
+            if next_generation < self._generation:
+                return False
+            self._generation = next_generation
             self._signature = signature
             self._uncertain = False
+            self._readiness = readiness if signature is not None else "unknown"
             self._condition.notify_all()
+            return True
 
-    def mark_uncertain(self) -> None:
+    def mark_uncertain(self, generation: int | None = None) -> None:
         with self._condition:
+            next_generation = self._generation if generation is None else generation
+            if next_generation < self._generation:
+                return
+            self._generation = next_generation
             if self._signature is not None:
                 self._uncertain = True
-                self._condition.notify_all()
+            self._condition.notify_all()
 
     def is_current(self, signature: str) -> bool:
         with self._condition:
@@ -151,6 +168,55 @@ class ActivePromptState:
                 not stop_event.is_set()
                 and self._signature == signature
                 and not self._uncertain
+            )
+
+    def wait_ready(
+        self,
+        signature: str,
+        stop_event: threading.Event,
+        timeout: float,
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while (
+                self._signature == signature
+                and (self._uncertain or self._readiness != "ready")
+                and not stop_event.is_set()
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(min(remaining, 0.05))
+            return (
+                not stop_event.is_set()
+                and self._signature == signature
+                and not self._uncertain
+                and self._readiness == "ready"
+            )
+
+    def wait_current_ready(
+        self,
+        signature: str,
+        stop_event: threading.Event,
+        timeout: float = 2.0,
+    ) -> bool:
+        """Wait through an in-flight frame, but fail closed on observed non-ready."""
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while (
+                self._signature == signature
+                and self._uncertain
+                and not stop_event.is_set()
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(min(remaining, 0.05))
+            return (
+                not stop_event.is_set()
+                and self._signature == signature
+                and not self._uncertain
+                and self._readiness == "ready"
             )
 
     def get(self) -> str | None:
@@ -180,10 +246,12 @@ class SafeKeyboardExecutor:
     def __init__(
         self,
         config: TypingConfig,
+        readiness_config: ReadinessConfig,
         active_prompt: ActivePromptState,
         stop_event: threading.Event,
     ) -> None:
         self._config = config
+        self._readiness_config = readiness_config
         self._active_prompt = active_prompt
         self._stop_event = stop_event
         self._guard = ForegroundWindowGuard(config)
@@ -215,7 +283,17 @@ class SafeKeyboardExecutor:
         return True
 
     def _still_valid(self, signature: str, *, check_window: bool = True) -> bool:
-        if not self._active_prompt.wait_current(signature, self._stop_event):
+        if self._readiness_config.require_green_outline:
+            state_valid = self._active_prompt.wait_current_ready(
+                signature,
+                self._stop_event,
+            )
+        else:
+            state_valid = self._active_prompt.wait_current(
+                signature,
+                self._stop_event,
+            )
+        if not state_valid:
             return False
         if check_window:
             allowed, reason = self._guard.allowed()
@@ -231,7 +309,17 @@ class SafeKeyboardExecutor:
                 return self._still_valid(signature, check_window=False)
             if self._stop_event.wait(min(remaining, 0.05)):
                 return False
-            if not self._active_prompt.wait_current(signature, self._stop_event):
+            if self._readiness_config.require_green_outline:
+                state_valid = self._active_prompt.wait_current_ready(
+                    signature,
+                    self._stop_event,
+                )
+            else:
+                state_valid = self._active_prompt.wait_current(
+                    signature,
+                    self._stop_event,
+                )
+            if not state_valid:
                 return False
 
     def execute(self, task: AnswerTask) -> bool:
@@ -239,6 +327,23 @@ class SafeKeyboardExecutor:
         if answer is None:
             LOGGER.warning("Rejected unsafe/empty answer: %r", task.answer)
             return False
+        if self._readiness_config.require_green_outline:
+            LOGGER.info(
+                "Answer resolved while locked; waiting for green outline on %s",
+                task.question_label or "the active round",
+            )
+            if not self._active_prompt.wait_ready(
+                task.prompt_signature,
+                self._stop_event,
+                self._readiness_config.ready_wait_timeout_seconds,
+            ):
+                LOGGER.warning("Green-outline gate timed out or the round changed")
+                return False
+            ready_observed_at = time.monotonic()
+            LOGGER.info("Green outline confirmed; humanized typing may begin")
+        else:
+            ready_observed_at = time.monotonic()
+
         if not self._config.enabled:
             LOGGER.info(
                 "DRY RUN [%s] %s -> %s", task.source, task.question_label or "?", answer
@@ -254,16 +359,21 @@ class SafeKeyboardExecutor:
 
         pre_delay = random.uniform(*self._config.pre_delay_seconds)
         delays = [random.uniform(*self._config.key_delay_seconds) for _ in answer]
-        countdown = (
-            task.countdown_seconds
-            if self._config.respect_detected_countdown
-            and task.countdown_seconds is not None
-            else self._config.fallback_answer_open_delay_seconds
-        )
-        answer_open_at = task.detected_at + max(0.0, countdown)
-        earliest_start = time.monotonic() + pre_delay
-        timed_start = answer_open_at - sum(delays)
-        start_at = max(earliest_start, timed_start)
+        if self._readiness_config.require_green_outline:
+            countdown = 0.0
+            answer_open_at = ready_observed_at
+            start_at = ready_observed_at + pre_delay
+        else:
+            countdown = (
+                task.countdown_seconds
+                if self._config.respect_detected_countdown
+                and task.countdown_seconds is not None
+                else self._config.fallback_answer_open_delay_seconds
+            )
+            answer_open_at = task.detected_at + max(0.0, countdown)
+            earliest_start = time.monotonic() + pre_delay
+            timed_start = answer_open_at - sum(delays)
+            start_at = max(earliest_start, timed_start)
         LOGGER.info(
             "Humanized submit scheduled: answer=%r pre-delay=%.3fs type≈%.3fs open-delay=%.3fs",
             answer,
@@ -339,8 +449,14 @@ class AnswerDispatcher:
     def start(self) -> None:
         self._thread.start()
 
-    def observe_prompt(self, signature: str | None) -> None:
-        self._active_prompt.update(signature)
+    def observe_prompt(
+        self,
+        signature: str | None,
+        readiness: str = "unknown",
+        generation: int | None = None,
+    ) -> bool:
+        if not self._active_prompt.update(signature, readiness, generation):
+            return False
         with self._lock:
             # A single transient OCR miss (None) must cancel pending typing but
             # must not re-arm an already answered clue. Rearm only after a
@@ -351,6 +467,7 @@ class AnswerDispatcher:
                 and signature != self._last_answered
             ):
                 self._last_answered = None
+        return True
 
     def submit(self, task: AnswerTask) -> bool:
         with self._lock:

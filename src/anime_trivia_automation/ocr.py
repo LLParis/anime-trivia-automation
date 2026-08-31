@@ -5,8 +5,8 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from .config import MatchConfig, OcrConfig, PromptConfig
-from .models import OcrSpan, PromptObservation, Scene
+from .config import MatchConfig, OcrConfig, PromptConfig, ReadinessConfig
+from .models import OcrSpan, PromptObservation, ReadinessState, Scene
 from .utils import normalize_question, short_signature
 
 LOGGER = logging.getLogger(__name__)
@@ -167,9 +167,15 @@ def _line_groups(spans: Iterable[OcrSpan]) -> list[OcrSpan]:
 class PromptExtractor:
     """Finds the newest Anime Soul card and isolates only its hint band."""
 
-    def __init__(self, prompt_config: PromptConfig, match_config: MatchConfig) -> None:
+    def __init__(
+        self,
+        prompt_config: PromptConfig,
+        match_config: MatchConfig,
+        readiness_config: ReadinessConfig | None = None,
+    ) -> None:
         self._config = prompt_config
         self._match = match_config
+        self._readiness = readiness_config or ReadinessConfig()
 
     def extract(
         self, scene: Scene, spans: tuple[OcrSpan, ...]
@@ -195,27 +201,40 @@ class PromptExtractor:
 
         header: OcrSpan | None = None
         answer_line: OcrSpan | None = None
-        selected_card_bottom = frame_height + 1
         ordered_headers = sorted(header_lines, key=lambda line: line.top)
-        for candidate_index in range(len(ordered_headers) - 1, -1, -1):
-            candidate = ordered_headers[candidate_index]
-            next_header_top = (
-                ordered_headers[candidate_index + 1].top
-                if candidate_index + 1 < len(ordered_headers)
-                else frame_height + 1
-            )
-            candidates = [
-                line
-                for line in answer_lines
-                if line.top > candidate.bottom and line.top < next_header_top
-            ]
-            if candidates:
-                header = candidate
-                answer_line = min(candidates, key=lambda line: line.top)
-                selected_card_bottom = next_header_top
-                break
-        if header is None or answer_line is None:
+        # Only the bottommost header can be the newest round. If it is still
+        # rendering, fail closed rather than falling back to an older card.
+        header = ordered_headers[-1]
+        candidates = [
+            line
+            for line in answer_lines
+            if line.top > header.bottom
+            and line.top - header.bottom <= self._config.max_header_to_answer_pixels
+            and abs(line.left - header.left)
+            <= self._config.horizontal_alignment_tolerance
+        ]
+        if not candidates:
             return None
+        answer_line = min(candidates, key=lambda line: line.top)
+        footer_candidates = [
+            line
+            for line in lines
+            if line.top > answer_line.bottom
+            and line.top - answer_line.bottom
+            <= self._config.max_answer_to_footer_pixels
+            and abs(line.left - answer_line.left)
+            <= self._config.horizontal_alignment_tolerance
+            and re.search(
+                r"question\s*\d+\s*/\s*\d+",
+                line.text,
+                flags=re.IGNORECASE,
+            )
+        ]
+        selected_card_bottom = (
+            min(footer_candidates, key=lambda line: line.top).bottom + 1
+            if footer_candidates
+            else min(frame_height + 1, answer_line.bottom + 100)
+        )
 
         card_lines = [
             line
@@ -223,6 +242,13 @@ class PromptExtractor:
             if line.top >= header.top and line.top < selected_card_bottom
         ]
         full_text = " ".join(line.text for line in card_lines)
+        readiness, red_pixels, green_pixels = self._detect_readiness(
+            frame,
+            card_lines,
+            header,
+            answer_line,
+            full_text,
+        )
 
         if self._config.static_hint_roi is not None:
             left, top, right, bottom = self._config.static_hint_roi
@@ -326,8 +352,114 @@ class PromptExtractor:
             countdown_seconds=countdown,
             question_label=question_label,
             signature=signature,
+            readiness=readiness,
+            red_outline_pixels=red_pixels,
+            green_outline_pixels=green_pixels,
             perceptual_hash=perceptual_hash,
         )
+
+    def _detect_readiness(
+        self,
+        frame: Any,
+        card_lines: Sequence[OcrSpan],
+        header: OcrSpan,
+        answer_line: OcrSpan,
+        full_text: str,
+    ) -> tuple[ReadinessState, int, int]:
+        try:
+            import cv2
+            import numpy as np
+        except ImportError as exc:
+            raise RuntimeError(
+                "OpenCV and NumPy are required for outline readiness detection"
+            ) from exc
+
+        frame_height, frame_width = frame.shape[:2]
+        question_lines = [
+            line for line in card_lines if "question" in normalize_question(line.text)
+        ]
+        bottom_anchor = (
+            max(line.bottom for line in question_lines)
+            if question_lines
+            else answer_line.bottom
+        )
+        text_left = min(
+            [header.left, answer_line.left, *(line.left for line in question_lines)]
+        )
+        left = max(0, text_left - self._readiness.search_left_pixels)
+        right = min(frame_width, text_left + self._readiness.search_right_pixels)
+        top = max(0, header.top - self._readiness.search_vertical_padding)
+        bottom = min(
+            frame_height,
+            bottom_anchor + self._readiness.search_vertical_padding,
+        )
+        strip = frame[top:bottom, left:right]
+        if strip.size == 0:
+            return "unknown", 0, 0
+
+        blue = strip[:, :, 0].astype(np.float32)
+        green = strip[:, :, 1].astype(np.float32)
+        red = strip[:, :, 2].astype(np.float32)
+        channel_ratio = self._readiness.channel_dominance_ratio
+        red_mask = (
+            (red >= self._readiness.red_min_channel)
+            & (red >= green * channel_ratio)
+            & (red >= blue * channel_ratio)
+        )
+        green_mask = (
+            (green >= self._readiness.green_min_channel)
+            & (green >= red * channel_ratio)
+            & (green >= blue * channel_ratio)
+        )
+        red_pixels = self._largest_outline_component(cv2, red_mask)
+        green_pixels = self._largest_outline_component(cv2, green_mask)
+        minimum = self._readiness.min_color_pixels
+        state_ratio = self._readiness.state_dominance_ratio
+
+        if green_pixels >= minimum and green_pixels >= red_pixels * state_ratio:
+            return "ready", red_pixels, green_pixels
+        if red_pixels >= minimum and red_pixels >= green_pixels * state_ratio:
+            return "locked", red_pixels, green_pixels
+
+        normalized = normalize_question(full_text)
+        text_ready = any(
+            normalize_question(marker) in normalized
+            for marker in self._readiness.ready_text_markers
+        )
+        text_locked = any(
+            normalize_question(marker) in normalized
+            for marker in self._readiness.locked_text_markers
+        )
+        if self._readiness.allow_text_only_ready and text_ready and not text_locked:
+            return "ready", red_pixels, green_pixels
+        if text_locked:
+            return "locked", red_pixels, green_pixels
+        return "unknown", red_pixels, green_pixels
+
+    def _largest_outline_component(self, cv2: Any, mask: Any) -> int:
+        component_count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            mask.astype("uint8"),
+            connectivity=8,
+        )
+        best_area = 0
+        for index in range(1, component_count):
+            width = int(stats[index, cv2.CC_STAT_WIDTH])
+            height = int(stats[index, cv2.CC_STAT_HEIGHT])
+            area = int(stats[index, cv2.CC_STAT_AREA])
+            if width <= 0:
+                continue
+            if height < self._readiness.min_outline_height_pixels:
+                continue
+            if width < self._readiness.min_outline_width_pixels:
+                continue
+            if width > self._readiness.max_outline_width_pixels:
+                continue
+            if height / width < self._readiness.min_outline_aspect_ratio:
+                continue
+            if area / (width * height) < self._readiness.min_outline_fill_ratio:
+                continue
+            best_area = max(best_area, area)
+        return best_area
 
     @staticmethod
     def _contains_any(text: str, markers: Sequence[str]) -> bool:

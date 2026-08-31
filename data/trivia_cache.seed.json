@@ -7,7 +7,14 @@
     "a short haired girl who fiercely protects her deaf older sister and initially distrusts the boy trying to reconnect with her": "Yuzuru Nishimiya",
     "a small sharp tongued girl nicknamed the palmtop tiger who is rarely seen without a wooden sword": "Taiga Aisaka",
     "a smiling first year bofurin student who wears an eyepatch and fights with a calm redirection based martial arts style": "Hayato Suo",
-    "a young martial arts prodigy who fights as king kazma inside a vast virtual world": "Kazuma Ikezawa"
+    "a tracksuit wearing shut in who is transported to another world and discovers that death can return him to an earlier point in time": "Subaru Natsuki",
+    "a young assassin with the ability to read minds who works for a retired legendary hitman": "Shin Asakura",
+    "a young martial arts prodigy who fights as king kazma inside a vast virtual world": "Kazuma Ikezawa",
+    "a young prince who begins as a timid hostage but gradually develops the composure and ambition needed to rule": "Canute",
+    "love is the most twisted curse of all": "Jujutsu Kaisen 0",
+    "moon prism power make up": "Sailor Moon",
+    "my drill is the drill that will pierce the heavens": "Gurren Lagann",
+    "talent is something you make bloom instinct is something you polish": "Haikyuu!!"
   },
   "image_hashes": {},
   "metadata": {
@@ -36,9 +43,37 @@
         "created_utc": "2026-08-31T00:00:00Z",
         "source": "user-supplied-example"
       },
+      "a tracksuit wearing shut in who is transported to another world and discovers that death can return him to an earlier point in time": {
+        "created_utc": "2026-08-31T20:00:00Z",
+        "source": "user-supplied-example-1200"
+      },
+      "a young assassin with the ability to read minds who works for a retired legendary hitman": {
+        "created_utc": "2026-08-31T20:00:00Z",
+        "source": "user-supplied-example-1200"
+      },
       "a young martial arts prodigy who fights as king kazma inside a vast virtual world": {
         "created_utc": "2026-08-31T00:00:00Z",
         "source": "user-supplied-example"
+      },
+      "a young prince who begins as a timid hostage but gradually develops the composure and ambition needed to rule": {
+        "created_utc": "2026-08-31T20:00:00Z",
+        "source": "user-supplied-example-1200"
+      },
+      "love is the most twisted curse of all": {
+        "created_utc": "2026-08-31T20:00:00Z",
+        "source": "user-supplied-example-1200"
+      },
+      "moon prism power make up": {
+        "created_utc": "2026-08-31T20:00:00Z",
+        "source": "user-supplied-example-1200"
+      },
+      "my drill is the drill that will pierce the heavens": {
+        "created_utc": "2026-08-31T20:00:00Z",
+        "source": "user-supplied-example-1200"
+      },
+      "talent is something you make bloom instinct is something you polish": {
+        "created_utc": "2026-08-31T20:00:00Z",
+        "source": "user-supplied-example-1200"
       }
     },
     "image_hashes": {}

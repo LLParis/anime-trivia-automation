@@ -112,18 +112,28 @@ class GpuFrameChangeGate:
                 return None
 
             delta = (current - self._previous).abs()
+            changed_map = (delta >= self._config.changed_pixel_threshold).float()
+            tile_size = self._config.localized_tile_size
+            localized_ratio = torch.nn.functional.avg_pool2d(
+                changed_map,
+                kernel_size=tile_size,
+                stride=max(1, tile_size // 2),
+            ).max()
             metrics = (
                 torch.stack(
                     (
                         delta.mean(),
-                        (delta >= self._config.changed_pixel_threshold).float().mean(),
+                        changed_map.mean(),
+                        localized_ratio,
                     )
                 )
                 .detach()
                 .cpu()
                 .tolist()
             )
-            mean_delta, changed_ratio = float(metrics[0]), float(metrics[1])
+            mean_delta = float(metrics[0])
+            changed_ratio = float(metrics[1])
+            localized_changed_ratio = float(metrics[2])
             self._previous = current
             self._last_mean_delta = mean_delta
             self._last_changed_ratio = changed_ratio
@@ -131,6 +141,7 @@ class GpuFrameChangeGate:
         changed = (
             mean_delta >= self._config.mean_absolute_threshold
             or changed_ratio >= self._config.changed_pixel_ratio
+            or localized_changed_ratio >= self._config.localized_changed_ratio
         )
         if changed:
             self._generation += 1

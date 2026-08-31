@@ -11,12 +11,15 @@ DXcam 60 FPS BGR crop
   -> CUDA change + 3-frame stability gate
   -> size-one latest-scene mailbox
   -> PaddleOCR GPU + newest-card/hint extraction
-       -> fuzzy text cache -------------------> guarded humanized typing
-       -> pHash image cache ------------------> guarded humanized typing
-       -> Qwen3-VL NF4 fallback -> atomic cache -> guarded humanized typing
+       -> solve/cache while red
+       -> 6px green-outline component gate
+       -> 0.4–1.1s human delay + guarded typing
+            -> fuzzy text cache
+            -> pHash image cache
+            -> Qwen3-VL NF4 fallback -> atomic cache
 ```
 
-The cache is already seeded with the seven unambiguous prose examples in the supplied screenshots: Taiga Aisaka, Benimaru, Hayato Suo, Kazuma Ikezawa, Yuzuru Nishimiya, Mont Blanc, and Tomoyo Daidouji. Emoji entries start empty and are learned after a valid VLM answer.
+The cache is seeded with all fourteen unambiguous prose/quote examples supplied so far. Emoji entries start empty and are learned after a valid VLM answer.
 
 ## Repository layout
 
@@ -61,7 +64,7 @@ Pre-download and disk-warm the OCR and VLM models before a live round:
    .\.venv\Scripts\python.exe .\scripts\calibrate_region.py --config .\config.json
    ```
 
-3. Drag a stable feed band large enough for the **tallest** expected newest card, including “Anime Guessing Game”, the hint, “Answer with…”, and the question/countdown line. Exclude the chat input, “several people are typing”, and unrelated sidebars. The extractor chooses the newest complete card inside the band.
+3. Drag a stable feed band large enough for the **tallest** expected newest card, including “Anime Guessing Game”, the colored left accent, the hint, “Answer with…”, and the question/status line. Exclude the chat input and unrelated sidebars. Normal chat messages may scroll above or below the card: the extractor anchors on the bottommost complete “Anime Guessing Game” card, validates its internal geometry, and ignores chatter.
 4. The script atomically updates `capture.region`, sets `capture.calibrated` to `true`, and copies the bare `[left, top, right, bottom]` array. Live startup is blocked while `calibrated` is false.
 
 DXcam regions are `(left, top, right, bottom)`, not `(x, y, width, height)`. `right` and `bottom` are exclusive. With `output_idx: null`, DXcam selects the primary output. To inspect all DXGI outputs:
@@ -98,7 +101,7 @@ The console reports the extracted clue, expected answer type, cache/VLM source, 
 
 Keep the Discord message box focused and reserve that editor for the macro during a round. Before every character and before Enter, the executor verifies that the foreground process is `Discord.exe`, the title contains `Discord`, and the same logical clue is still active. Native foreground APIs cannot distinguish Discord’s message editor from its search field, so caret placement remains a required operator boundary. The macro tracks and backspaces only its own partial characters after an interrupted answer. The macro and Discord must run at the same Windows integrity level; synthetic input generally cannot cross from a normal process into an elevated target.
 
-For the supplied cards, “answers open in 5s” is parsed from OCR. If that footer is missed, the safe configured fallback is also 5 seconds. The executor generates all per-character delays first, waits at least the configured random 0.4–1.1 seconds, starts typing late enough to look natural, and holds Enter until the answer-open time plus a small slack. If the model returns after the window has already opened, the required random pre-typing delay still applies.
+The red/green card accent is authoritative. During the red `Get Ready` state the pipeline may OCR, solve, and cache, but keyboard execution remains blocked. It releases only when the **same question number/card** has a tall narrow green outline component and no dominant red component. “Answer Now!” and “answers OPEN · you have 60s” are logged as corroboration, not trusted by themselves. After green is confirmed, the required random 0.4–1.1 second pause begins, followed by 0.03–0.08 second per-character typing. The green state is rechecked through the delay, before every character, and immediately before Enter. Unknown, mixed, stale, or newly red state fails closed.
 
 ## Cache format
 
@@ -126,9 +129,10 @@ Valid Qwen answers are appended automatically. Writes go to a temporary file in 
 
 ## Performance and calibration notes
 
-- The sub-0.3 second goal applies to the warmed capture/change/OCR/cache path. The mandated 0.4–1.1 second pre-typing delay alone makes detect-to-submit longer than 0.4 seconds, and a generative VLM miss is seconds-scale. That miss becomes a pHash/text-cache fast hit on the next occurrence.
+- The sub-0.3 second goal applies to the warmed capture/change/OCR/cache path. Submission intentionally waits for green and then the mandated 0.4–1.1 second human delay; a generative VLM miss is seconds-scale and becomes a pHash/text-cache fast hit next time.
 - DXcam performs the region copy through Desktop Duplication, but exposes a CPU NumPy array. PaddleOCR, Qwen3-VL, and the frame-change gate run on CUDA. The required Python `imagehash` pHash is CPU/SciPy code and normally takes only a few milliseconds; claiming it is GPU-resident would be inaccurate.
-- `video_mode: true` supplies an actual 60 FPS stream even when Discord is static. Duplicate frames are discarded by the CUDA comparison. Three stable frames (about 50 ms at 60 FPS) prevent OCR from firing on a half-scrolled or half-rendered card.
+- `video_mode: true` supplies an actual 60 FPS stream even when Discord is static. Duplicate frames are discarded by the CUDA comparison. A localized CUDA tile trigger makes the narrow red→green edit visible even inside a large chat band; three stable frames (about 50 ms at 60 FPS) prevent OCR from firing on a half-scrolled card.
+- The supplied locked accent is RGB `#ED4245`; ready is `#2ECC70`. Detection also requires a narrow component at least 80 px tall, 3–14 px wide, aspect ratio at least 12, and 60% fill, preventing green/red emoji and chat text from opening the gate.
 - If harmless animation repeatedly triggers OCR, crop more tightly first. If necessary, add relative rectangles to `change_detection.ignore_regions` or raise `mean_absolute_threshold` slightly.
 - If a real card change is missed, lower `mean_absolute_threshold` and `changed_pixel_ratio` gradually.
 - PaddleOCR is initialized once and runs a generated known-text smoke image. A CUDA runtime that loads but returns zero boxes fails startup instead of silently running blind.

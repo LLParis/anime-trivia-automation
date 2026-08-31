@@ -62,6 +62,8 @@ class ChangeDetectionConfig:
     mean_absolute_threshold: float = 0.012
     changed_pixel_threshold: float = 0.055
     changed_pixel_ratio: float = 0.012
+    localized_tile_size: int = 12
+    localized_changed_ratio: float = 0.08
     stable_frames: int = 3
     ignore_regions: tuple[Region, ...] = ()
 
@@ -69,15 +71,48 @@ class ChangeDetectionConfig:
 @dataclass(frozen=True)
 class PromptConfig:
     # Optional region relative to the capture crop. When null, OCR boxes locate
-    # the band between "Get Ready" and "Answer with" dynamically.
+    # the band between "Anime Guessing Game" and "Answer with" dynamically.
     static_hint_roi: Region | None = None
     min_text_characters: int = 10
     min_alpha_characters: int = 6
     visual_min_stddev: float = 4.0
     crop_padding_x: int = 14
     crop_padding_y: int = 3
-    header_markers: tuple[str, ...] = ("anime guessing game", "get ready")
+    max_header_to_answer_pixels: int = 300
+    max_answer_to_footer_pixels: int = 120
+    horizontal_alignment_tolerance: int = 96
+    header_markers: tuple[str, ...] = ("anime guessing game",)
     answer_markers: tuple[str, ...] = ("answer with", "first correct guess")
+
+
+@dataclass(frozen=True)
+class ReadinessConfig:
+    # The Discord embed's colored left outline is authoritative. OCR status text
+    # is recorded as corroborating evidence but cannot open the gate by default.
+    require_green_outline: bool = True
+    ready_wait_timeout_seconds: float = 20.0
+    search_left_pixels: int = 96
+    search_right_pixels: int = 16
+    search_vertical_padding: int = 18
+    min_color_pixels: int = 300
+    min_outline_height_pixels: int = 80
+    min_outline_width_pixels: int = 3
+    max_outline_width_pixels: int = 14
+    min_outline_aspect_ratio: float = 12.0
+    min_outline_fill_ratio: float = 0.60
+    red_min_channel: int = 140
+    green_min_channel: int = 100
+    channel_dominance_ratio: float = 1.25
+    state_dominance_ratio: float = 1.50
+    allow_text_only_ready: bool = False
+    ready_text_markers: tuple[str, ...] = (
+        "answer now",
+        "answers open you have",
+    )
+    locked_text_markers: tuple[str, ...] = (
+        "get ready",
+        "reading time",
+    )
 
 
 @dataclass(frozen=True)
@@ -146,6 +181,7 @@ class AppConfig:
         default_factory=ChangeDetectionConfig
     )
     prompt: PromptConfig = field(default_factory=PromptConfig)
+    readiness: ReadinessConfig = field(default_factory=ReadinessConfig)
     ocr: OcrConfig = field(default_factory=OcrConfig)
     matching: MatchConfig = field(default_factory=MatchConfig)
     vlm: VlmConfig = field(default_factory=VlmConfig)
@@ -163,6 +199,7 @@ def load_config(path: str | Path) -> AppConfig:
     capture_raw = _section(raw, "capture")
     change_raw = _section(raw, "change_detection")
     prompt_raw = _section(raw, "prompt")
+    readiness_raw = _section(raw, "readiness")
     ocr_raw = _section(raw, "ocr")
     match_raw = _section(raw, "matching")
     vlm_raw = _section(raw, "vlm")
@@ -197,6 +234,8 @@ def load_config(path: str | Path) -> AppConfig:
         mean_absolute_threshold=float(change_raw.get("mean_absolute_threshold", 0.012)),
         changed_pixel_threshold=float(change_raw.get("changed_pixel_threshold", 0.055)),
         changed_pixel_ratio=float(change_raw.get("changed_pixel_ratio", 0.012)),
+        localized_tile_size=int(change_raw.get("localized_tile_size", 12)),
+        localized_changed_ratio=float(change_raw.get("localized_changed_ratio", 0.08)),
         stable_frames=int(change_raw.get("stable_frames", 3)),
         ignore_regions=ignore_regions,  # type: ignore[arg-type]
     )
@@ -210,16 +249,62 @@ def load_config(path: str | Path) -> AppConfig:
         visual_min_stddev=float(prompt_raw.get("visual_min_stddev", 4.0)),
         crop_padding_x=int(prompt_raw.get("crop_padding_x", 14)),
         crop_padding_y=int(prompt_raw.get("crop_padding_y", 3)),
+        max_header_to_answer_pixels=int(
+            prompt_raw.get("max_header_to_answer_pixels", 300)
+        ),
+        max_answer_to_footer_pixels=int(
+            prompt_raw.get("max_answer_to_footer_pixels", 120)
+        ),
+        horizontal_alignment_tolerance=int(
+            prompt_raw.get("horizontal_alignment_tolerance", 96)
+        ),
         header_markers=tuple(
             str(v).casefold()
-            for v in prompt_raw.get(
-                "header_markers", ["anime guessing game", "get ready"]
-            )
+            for v in prompt_raw.get("header_markers", ["anime guessing game"])
         ),
         answer_markers=tuple(
             str(v).casefold()
             for v in prompt_raw.get(
                 "answer_markers", ["answer with", "first correct guess"]
+            )
+        ),
+    )
+
+    readiness = ReadinessConfig(
+        require_green_outline=bool(readiness_raw.get("require_green_outline", True)),
+        ready_wait_timeout_seconds=float(
+            readiness_raw.get("ready_wait_timeout_seconds", 20.0)
+        ),
+        search_left_pixels=int(readiness_raw.get("search_left_pixels", 96)),
+        search_right_pixels=int(readiness_raw.get("search_right_pixels", 16)),
+        search_vertical_padding=int(readiness_raw.get("search_vertical_padding", 18)),
+        min_color_pixels=int(readiness_raw.get("min_color_pixels", 300)),
+        min_outline_height_pixels=int(
+            readiness_raw.get("min_outline_height_pixels", 80)
+        ),
+        min_outline_width_pixels=int(readiness_raw.get("min_outline_width_pixels", 3)),
+        max_outline_width_pixels=int(readiness_raw.get("max_outline_width_pixels", 14)),
+        min_outline_aspect_ratio=float(
+            readiness_raw.get("min_outline_aspect_ratio", 12.0)
+        ),
+        min_outline_fill_ratio=float(readiness_raw.get("min_outline_fill_ratio", 0.60)),
+        red_min_channel=int(readiness_raw.get("red_min_channel", 140)),
+        green_min_channel=int(readiness_raw.get("green_min_channel", 100)),
+        channel_dominance_ratio=float(
+            readiness_raw.get("channel_dominance_ratio", 1.25)
+        ),
+        state_dominance_ratio=float(readiness_raw.get("state_dominance_ratio", 1.50)),
+        allow_text_only_ready=bool(readiness_raw.get("allow_text_only_ready", False)),
+        ready_text_markers=tuple(
+            str(value).casefold()
+            for value in readiness_raw.get(
+                "ready_text_markers", ["answer now", "answers open you have"]
+            )
+        ),
+        locked_text_markers=tuple(
+            str(value).casefold()
+            for value in readiness_raw.get(
+                "locked_text_markers", ["get ready", "reading time"]
             )
         ),
     )
@@ -317,6 +402,7 @@ def load_config(path: str | Path) -> AppConfig:
         capture=capture,
         change_detection=change_detection,
         prompt=prompt,
+        readiness=readiness,
         ocr=ocr,
         matching=matching,
         vlm=vlm,
@@ -359,9 +445,16 @@ def validate_config(config: AppConfig) -> None:
         ("mean_absolute_threshold", config.change_detection.mean_absolute_threshold),
         ("changed_pixel_threshold", config.change_detection.changed_pixel_threshold),
         ("changed_pixel_ratio", config.change_detection.changed_pixel_ratio),
+        ("localized_changed_ratio", config.change_detection.localized_changed_ratio),
     ):
         if not 0.0 <= value <= 1.0:
             raise ValueError(f"change_detection.{name} must be between 0 and 1")
+    if (
+        not 1
+        <= config.change_detection.localized_tile_size
+        <= min(config.change_detection.thumbnail_size)
+    ):
+        raise ValueError("change_detection.localized_tile_size is invalid")
     if config.prompt.static_hint_roi is not None:
         _left, _top, right, bottom = config.prompt.static_hint_roi
         if right > capture_width or bottom > capture_height:
@@ -370,6 +463,59 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("prompt header/answer marker lists cannot be empty")
     if config.prompt.min_text_characters < 1 or config.prompt.min_alpha_characters < 1:
         raise ValueError("prompt text thresholds must be positive")
+    if (
+        min(
+            config.prompt.max_header_to_answer_pixels,
+            config.prompt.max_answer_to_footer_pixels,
+            config.prompt.horizontal_alignment_tolerance,
+        )
+        <= 0
+    ):
+        raise ValueError("prompt geometry limits must be positive")
+    if config.readiness.ready_wait_timeout_seconds <= 0:
+        raise ValueError("readiness.ready_wait_timeout_seconds must be positive")
+    if (
+        min(
+            config.readiness.search_left_pixels,
+            config.readiness.search_right_pixels,
+            config.readiness.search_vertical_padding,
+        )
+        < 0
+    ):
+        raise ValueError("readiness search sizes must be nonnegative")
+    if (
+        min(
+            config.readiness.min_color_pixels,
+            config.readiness.min_outline_height_pixels,
+            config.readiness.min_outline_width_pixels,
+            config.readiness.max_outline_width_pixels,
+        )
+        <= 0
+    ):
+        raise ValueError("readiness component dimensions/counts must be positive")
+    if (
+        config.readiness.min_outline_width_pixels
+        > config.readiness.max_outline_width_pixels
+    ):
+        raise ValueError("readiness outline width minimum exceeds maximum")
+    if (
+        not 0 <= config.readiness.red_min_channel <= 255
+        or not 0 <= config.readiness.green_min_channel <= 255
+    ):
+        raise ValueError("readiness channel minimums must be between 0 and 255")
+    if config.readiness.channel_dominance_ratio <= 1.0:
+        raise ValueError("readiness.channel_dominance_ratio must exceed 1")
+    if config.readiness.state_dominance_ratio <= 1.0:
+        raise ValueError("readiness.state_dominance_ratio must exceed 1")
+    if config.readiness.min_outline_aspect_ratio <= 1.0:
+        raise ValueError("readiness.min_outline_aspect_ratio must exceed 1")
+    if not 0.0 < config.readiness.min_outline_fill_ratio <= 1.0:
+        raise ValueError("readiness.min_outline_fill_ratio must be between 0 and 1")
+    if (
+        not config.readiness.ready_text_markers
+        or not config.readiness.locked_text_markers
+    ):
+        raise ValueError("readiness text marker lists cannot be empty")
     for index, region in enumerate(config.change_detection.ignore_regions):
         if region is None:
             continue

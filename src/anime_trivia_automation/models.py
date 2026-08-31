@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+ReadinessState = Literal["locked", "ready", "unknown"]
+
 
 @dataclass(frozen=True)
 class Scene:
@@ -53,6 +55,9 @@ class PromptObservation:
     countdown_seconds: float | None
     question_label: str | None
     signature: str
+    readiness: ReadinessState
+    red_outline_pixels: int = 0
+    green_outline_pixels: int = 0
     perceptual_hash: str | None = None
 
 

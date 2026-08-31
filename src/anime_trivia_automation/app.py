@@ -52,7 +52,11 @@ class AnimeTriviaAutomation:
             on_change=self._on_visual_change,
         )
         self._ocr = PaddleOCREngine(config.ocr)
-        self._extractor = PromptExtractor(config.prompt, config.matching)
+        self._extractor = PromptExtractor(
+            config.prompt,
+            config.matching,
+            config.readiness,
+        )
         self._cache = TriviaCache(
             config.runtime.cache_path,
             config.matching,
@@ -61,7 +65,10 @@ class AnimeTriviaAutomation:
         self._vlm = LazyQwenResolver(config.vlm)
 
         self._keyboard = SafeKeyboardExecutor(
-            config.typing, self._active_prompt, self._stop_event
+            config.typing,
+            config.readiness,
+            self._active_prompt,
+            self._stop_event,
         )
         self._dispatcher = AnswerDispatcher(
             self._keyboard, self._active_prompt, self._stop_event
@@ -77,7 +84,7 @@ class AnimeTriviaAutomation:
     def _on_visual_change(self, generation: int) -> None:
         # Pause any in-progress input immediately. OCR will either revalidate
         # the same logical round (for a harmless status edit) or replace it.
-        self._active_prompt.mark_uncertain()
+        self._active_prompt.mark_uncertain(generation)
         LOGGER.debug("Visual scene changed; generation %d awaiting OCR", generation)
 
     def _on_frame(self, frame: Any, captured_at: float) -> None:
@@ -130,19 +137,34 @@ class AnimeTriviaAutomation:
         observation = self._extractor.extract(scene, spans)
         extract_ms = (time.perf_counter() - extract_start) * 1000.0
         if observation is None:
-            self._dispatcher.observe_prompt(None)
+            # A partial render or one OCR miss must never reactivate an older
+            # card or re-arm an answered round. Keep the state uncertain until
+            # a complete current-generation card is observed.
+            self._active_prompt.mark_uncertain(scene.generation)
             LOGGER.debug(
                 "Scene %d contains no complete Anime Soul prompt", scene.generation
             )
             return
 
-        self._dispatcher.observe_prompt(observation.signature)
+        if not self._dispatcher.observe_prompt(
+            observation.signature,
+            observation.readiness,
+            scene.generation,
+        ):
+            LOGGER.debug(
+                "Discarded stale OCR observation for scene %d", scene.generation
+            )
+            return
         self._save_prompt_crop(observation)
         LOGGER.info(
-            "Prompt %s kind=%s type=%s hint=%r OCR=%.1fms extract/hash=%.1fms",
+            "Prompt %s kind=%s type=%s readiness=%s (red=%d green=%d) hint=%r "
+            "OCR=%.1fms extract/hash=%.1fms",
             observation.question_label or "?",
             observation.prompt_kind,
             observation.expected_answer_type,
+            observation.readiness,
+            observation.red_outline_pixels,
+            observation.green_outline_pixels,
             observation.hint_text or "<visual/emoji>",
             ocr_ms,
             extract_ms,
@@ -308,14 +330,17 @@ def inspect_image(
     """Offline inspection path for the user's saved Anime Soul screenshots."""
     try:
         import cv2
+        import numpy as np
     except ImportError as exc:
-        raise RuntimeError("OpenCV is required for --inspect-image") from exc
-    frame = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        raise RuntimeError("OpenCV and NumPy are required for --inspect-image") from exc
+    # cv2.imread does not reliably accept non-ASCII Windows paths (for example
+    # the user's Imágenes folder); decode bytes read through Python instead.
+    frame = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         raise FileNotFoundError(f"Could not read image: {image_path}")
 
     ocr = PaddleOCREngine(config.ocr)
-    extractor = PromptExtractor(config.prompt, config.matching)
+    extractor = PromptExtractor(config.prompt, config.matching, config.readiness)
     cache = TriviaCache(
         config.runtime.cache_path,
         config.matching,
@@ -348,6 +373,9 @@ def inspect_image(
         "question": observation.question_label,
         "kind": observation.prompt_kind,
         "expected_answer_type": observation.expected_answer_type,
+        "readiness": observation.readiness,
+        "red_outline_pixels": observation.red_outline_pixels,
+        "green_outline_pixels": observation.green_outline_pixels,
         "hint_text": observation.hint_text,
         "perceptual_hash": observation.perceptual_hash,
         "answer": answer,
