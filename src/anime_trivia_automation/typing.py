@@ -181,6 +181,7 @@ class ActivePromptState:
             while (
                 self._signature == signature
                 and (self._uncertain or self._readiness != "ready")
+                and self._readiness != "closed"
                 and not stop_event.is_set()
             ):
                 remaining = deadline - time.monotonic()

@@ -26,13 +26,25 @@ if ($actualPython.Trim() -ne $PythonVersion) {
 & $venvPython -m pip install --upgrade pip setuptools wheel
 if ($LASTEXITCODE -ne 0) { throw 'pip bootstrap failed.' }
 
+# Remove the legacy second CUDA stack if repairing an earlier partial install.
+# PaddleOCR's Transformers engine shares one PyTorch/CUDA runtime with Qwen.
+$legacyCudaPackages = @(
+    'paddlepaddle-gpu',
+    'nvidia-cuda-runtime-cu12',
+    'nvidia-cudnn-cu12',
+    'nvidia-cublas-cu12',
+    'nvidia-cufft-cu12',
+    'nvidia-curand-cu12',
+    'nvidia-cusolver-cu12',
+    'nvidia-cusparse-cu12',
+    'nvidia-nvjitlink-cu12'
+)
+& $venvPython -m pip uninstall --yes @legacyCudaPackages | Out-Host
+if ($LASTEXITCODE -ne 0) { throw 'Legacy CUDA runtime cleanup failed.' }
+
 # Current stable CUDA 13.0 PyTorch includes Blackwell/sm_120 kernels.
 & $venvPython -m pip install torch==2.13.0+cu130 torchvision==0.28.0+cu130 --index-url https://download.pytorch.org/whl/cu130
 if ($LASTEXITCODE -ne 0) { throw 'CUDA PyTorch installation failed.' }
-
-# Paddle's official CUDA 12.9 index currently supplies the Windows GPU wheel.
-& $venvPython -m pip install paddlepaddle-gpu==3.3.1 --index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/
-if ($LASTEXITCODE -ne 0) { throw 'PaddlePaddle GPU installation failed.' }
 
 & $venvPython -m pip install --editable $repoRoot
 if ($LASTEXITCODE -ne 0) { throw 'Application dependency installation failed.' }
@@ -40,8 +52,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Application dependency installation failed.' }
 & $venvPython -m pip check
 if ($LASTEXITCODE -ne 0) { throw 'Installed dependency set is inconsistent.' }
 
-# Mirror application import order and execute real kernels in both runtimes.
-& $venvPython -c "import torch; assert torch.cuda.is_available(); t=torch.ones(1024,device='cuda').sum(); torch.cuda.synchronize(); print('torch',torch.__version__,torch.cuda.get_device_name(0),t.item()); import paddle; assert paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count()>0; paddle.set_device('gpu:0'); p=paddle.ones([1024]).sum(); paddle.device.cuda.synchronize(); print('paddle',paddle.__version__,'gpus=',paddle.device.cuda.device_count(),'sum=',float(p)); paddle.utils.run_check()"
+# Execute a real Blackwell CUDA kernel before model initialization.
+& $venvPython -c "import torch; assert torch.cuda.is_available(); t=torch.ones(1024,device='cuda').sum(); torch.cuda.synchronize(); print('torch',torch.__version__,torch.cuda.get_device_name(0),t.item())"
 if ($LASTEXITCODE -ne 0) { throw 'GPU runtime verification failed.' }
 
 # Mandatory known-text inference catches Windows/Blackwell builds that load

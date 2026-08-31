@@ -33,21 +33,18 @@ class PaddleOCREngine:
     def __init__(self, config: OcrConfig) -> None:
         self._config = config
         try:
-            import paddle
+            import torch
             from paddleocr import PaddleOCR
         except ImportError as exc:
             raise RuntimeError(
                 "PaddleOCR runtime is missing. Run scripts/install_windows.ps1 first."
             ) from exc
 
-        if config.require_cuda:
-            compiled = bool(paddle.is_compiled_with_cuda())
-            device_count = int(paddle.device.cuda.device_count()) if compiled else 0
-            if not compiled or device_count < 1:
-                raise RuntimeError(
-                    "PaddlePaddle GPU support is unavailable. Install the official cu129 "
-                    "paddlepaddle-gpu wheel and verify the NVIDIA driver."
-                )
+        if config.require_cuda and not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA PyTorch is unavailable. Install the CUDA 13 PyTorch wheel "
+                "and verify the NVIDIA driver."
+            )
         LOGGER.info(
             "Loading PaddleOCR: engine=%s device=%s det=%s rec=%s",
             config.engine,
@@ -96,8 +93,7 @@ class PaddleOCREngine:
         if not spans:
             raise RuntimeError(
                 "PaddleOCR loaded on CUDA but returned zero boxes for a known-text smoke image. "
-                "This can indicate an incompatible Windows/RTX 50-series Paddle wheel; do not "
-                "run the macro until the OCR runtime is fixed."
+                "Do not run the macro until the OCR runtime is fixed."
             )
         LOGGER.info(
             "PaddleOCR warm-up passed: %s", " | ".join(span.text for span in spans)
@@ -176,6 +172,68 @@ class PromptExtractor:
         self._config = prompt_config
         self._match = match_config
         self._readiness = readiness_config or ReadinessConfig()
+
+    def crop_to_active_card(self, scene: Scene) -> tuple[Scene, bool]:
+        """Prelocate the bottommost active red/green card before expensive OCR."""
+        if not self._readiness.prelocate_active_card:
+            return scene, False
+        try:
+            import cv2
+            import numpy as np
+        except ImportError as exc:
+            raise RuntimeError(
+                "OpenCV and NumPy are required for active-card prelocation"
+            ) from exc
+
+        frame = scene.frame
+        blue = frame[:, :, 0].astype(np.float32)
+        green = frame[:, :, 1].astype(np.float32)
+        red = frame[:, :, 2].astype(np.float32)
+        ratio = self._readiness.channel_dominance_ratio
+        red_mask = (
+            (red >= self._readiness.red_min_channel)
+            & (red >= green * ratio)
+            & (red >= blue * ratio)
+        )
+        green_mask = (
+            (green >= self._readiness.green_min_channel)
+            & (green >= red * ratio)
+            & (green >= blue * ratio)
+        )
+        components = [
+            *self._outline_components(cv2, red_mask),
+            *self._outline_components(cv2, green_mask),
+        ]
+        if not components:
+            return scene, False
+
+        x, y, _width, height, _area = max(
+            components,
+            key=lambda component: (component[1] + component[3], component[4]),
+        )
+        frame_height, frame_width = frame.shape[:2]
+        padding = self._readiness.prelocate_padding_pixels
+        left = max(0, x - padding)
+        top = max(0, y - padding)
+        right = min(
+            frame_width,
+            x + self._readiness.prelocate_right_extent_pixels,
+        )
+        bottom = min(frame_height, y + height + padding)
+        if right - left < 200 or bottom - top < 80:
+            return scene, False
+        cropped = frame[top:bottom, left:right].copy()
+        return (
+            Scene(
+                generation=scene.generation,
+                frame=cropped,
+                captured_at=scene.captured_at,
+                detected_at=scene.detected_at,
+                mean_delta=scene.mean_delta,
+                changed_ratio=scene.changed_ratio,
+            ),
+            True,
+        )
 
     def extract(
         self, scene: Scene, spans: tuple[OcrSpan, ...]
@@ -330,6 +388,7 @@ class PromptExtractor:
                 raise RuntimeError(
                     "Pillow, NumPy, and ImageHash are required for visual prompts"
                 ) from exc
+            prompt_crop = self._trim_visual_content(prompt_crop, np)
             if float(np.std(prompt_crop)) < self._config.visual_min_stddev:
                 LOGGER.debug(
                     "Ignoring blank/transition visual prompt (stddev below threshold)"
@@ -357,6 +416,36 @@ class PromptExtractor:
             green_outline_pixels=green_pixels,
             perceptual_hash=perceptual_hash,
         )
+
+    def _trim_visual_content(self, image: Any, np: Any) -> Any:
+        if image.shape[0] < 3 or image.shape[1] < 3:
+            return image
+        border = np.concatenate(
+            (
+                image[0, :, :],
+                image[-1, :, :],
+                image[:, 0, :],
+                image[:, -1, :],
+            ),
+            axis=0,
+        ).astype(np.float32)
+        background = np.median(border, axis=0)
+        distance = np.max(
+            np.abs(image.astype(np.float32) - background.reshape(1, 1, 3)),
+            axis=2,
+        )
+        mask = distance >= self._config.visual_trim_threshold
+        ys, xs = np.where(mask)
+        if len(xs) < 16:
+            return image
+        padding = self._config.visual_trim_padding
+        left = max(0, int(xs.min()) - padding)
+        right = min(image.shape[1], int(xs.max()) + padding + 1)
+        top = max(0, int(ys.min()) - padding)
+        bottom = min(image.shape[0], int(ys.max()) + padding + 1)
+        if right - left < 8 or bottom - top < 8:
+            return image
+        return image[top:bottom, left:right].copy()
 
     def _detect_readiness(
         self,
@@ -430,6 +519,12 @@ class PromptExtractor:
             normalize_question(marker) in normalized
             for marker in self._readiness.locked_text_markers
         )
+        text_closed = any(
+            normalize_question(marker) in normalized
+            for marker in self._readiness.closed_text_markers
+        )
+        if text_closed:
+            return "closed", red_pixels, green_pixels
         if self._readiness.allow_text_only_ready and text_ready and not text_locked:
             return "ready", red_pixels, green_pixels
         if text_locked:
@@ -437,12 +532,20 @@ class PromptExtractor:
         return "unknown", red_pixels, green_pixels
 
     def _largest_outline_component(self, cv2: Any, mask: Any) -> int:
+        components = self._outline_components(cv2, mask)
+        return max((component[4] for component in components), default=0)
+
+    def _outline_components(
+        self, cv2: Any, mask: Any
+    ) -> list[tuple[int, int, int, int, int]]:
         component_count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
             mask.astype("uint8"),
             connectivity=8,
         )
-        best_area = 0
+        components: list[tuple[int, int, int, int, int]] = []
         for index in range(1, component_count):
+            left = int(stats[index, cv2.CC_STAT_LEFT])
+            top = int(stats[index, cv2.CC_STAT_TOP])
             width = int(stats[index, cv2.CC_STAT_WIDTH])
             height = int(stats[index, cv2.CC_STAT_HEIGHT])
             area = int(stats[index, cv2.CC_STAT_AREA])
@@ -458,8 +561,8 @@ class PromptExtractor:
                 continue
             if area / (width * height) < self._readiness.min_outline_fill_ratio:
                 continue
-            best_area = max(best_area, area)
-        return best_area
+            components.append((left, top, width, height, area))
+        return components
 
     @staticmethod
     def _contains_any(text: str, markers: Sequence[str]) -> bool:

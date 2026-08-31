@@ -16,7 +16,14 @@
     "my drill is the drill that will pierce the heavens": "Gurren Lagann",
     "talent is something you make bloom instinct is something you polish": "Haikyuu!!"
   },
-  "image_hashes": {},
+  "image_hashes": {
+    "dd0f32d422f8592b7ad68791db85e1c48d08246e25bbd2d125fbd999da2484f6": "Delicious in Dungeon",
+    "dc41936620be6c0923b1d8b3fbc113fcde7cb04e0ce6dc1a211eece163fb013e": "Castle in the Sky",
+    "ee6f1c303191e3cf8c3cfc7f03e13380f38c1c38cc7fcfef3c77238039180087": "Neon Genesis Evangelion",
+    "f0f003f00f0ffc1fe1f0e3e0f00f060ffe1f041fc1c0f0ffe7f80e0e0e1f1f00": "Neon Genesis Evangelion",
+    "f0ff0f800f00f87ff1f8e0001f1f0780f03fffffe00000ff0fc0f81ffc7fc000": "Delicious in Dungeon",
+    "f1ff01000e00ff3fe1e0e0ffff0f0600fe7fc3c0c07fffff0200fc1f0f800038": "Castle in the Sky"
+  },
   "metadata": {
     "text_questions": {
       "a gentle nature loving robot who is powerful enough to be counted among the world s seven greatest robots": {
@@ -76,6 +83,37 @@
         "source": "user-supplied-example-1200"
       }
     },
-    "image_hashes": {}
+    "image_hashes": {
+      "dd0f32d422f8592b7ad68791db85e1c48d08246e25bbd2d125fbd999da2484f6": {
+        "created_utc": "2026-08-31T21:47:00Z",
+        "hash_size": 16,
+        "source": "normalized-user-supplied-example-1200"
+      },
+      "dc41936620be6c0923b1d8b3fbc113fcde7cb04e0ce6dc1a211eece163fb013e": {
+        "created_utc": "2026-08-31T21:47:00Z",
+        "hash_size": 16,
+        "source": "normalized-user-supplied-example-1200"
+      },
+      "ee6f1c303191e3cf8c3cfc7f03e13380f38c1c38cc7fcfef3c77238039180087": {
+        "created_utc": "2026-08-31T21:47:00Z",
+        "hash_size": 16,
+        "source": "normalized-user-supplied-example-1200"
+      },
+      "f0f003f00f0ffc1fe1f0e3e0f00f060ffe1f041fc1c0f0ffe7f80e0e0e1f1f00": {
+        "created_utc": "2026-08-31T21:32:00Z",
+        "hash_size": 16,
+        "source": "user-supplied-example-1200"
+      },
+      "f0ff0f800f00f87ff1f8e0001f1f0780f03fffffe00000ff0fc0f81ffc7fc000": {
+        "created_utc": "2026-08-31T21:32:00Z",
+        "hash_size": 16,
+        "source": "user-supplied-example-1200"
+      },
+      "f1ff01000e00ff3fe1e0e0ffff0f0600fe7fc3c0c07fffff0200fc1f0f800038": {
+        "created_utc": "2026-08-31T21:32:00Z",
+        "hash_size": 16,
+        "source": "user-supplied-example-1200"
+      }
+    }
   }
 }

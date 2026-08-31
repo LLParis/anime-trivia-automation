@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-ReadinessState = Literal["locked", "ready", "unknown"]
+ReadinessState = Literal["locked", "ready", "closed", "unknown"]
 
 
 @dataclass(frozen=True)

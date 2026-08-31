@@ -19,7 +19,7 @@ DXcam 60 FPS BGR crop
             -> Qwen3-VL NF4 fallback -> atomic cache
 ```
 
-The cache is seeded with all fourteen unambiguous prose/quote examples supplied so far. Emoji entries start empty and are learned after a valid VLM answer.
+The cache is seeded with all fourteen unambiguous prose/quote examples and the three supplied emoji rounds. Novel visual clues fail closed by default instead of submitting an unverified model guess; when the bot later posts “the answer was …”, the app learns that authoritative answer for the next recurrence.
 
 ## Repository layout
 
@@ -37,15 +37,15 @@ Use PowerShell from the repository root:
 
 ```powershell
 Set-Location D:\11_CS\00_REPOS\anime-trivia-automation
-powershell -ExecutionPolicy Bypass -File .\scripts\install_windows.ps1
+& .\scripts\install_windows.ps1
 Copy-Item .\config.example.json .\config.json
 ```
 
-The installer deliberately uses different official package indexes:
+The installer uses one shared GPU runtime:
 
 - PyTorch 2.13 CUDA 13.0 for current stable Blackwell/sm_120 support.
-- PaddlePaddle GPU 3.3.1 from Paddle’s CUDA 12.9 Windows index.
-- DXcam 0.3.0, PaddleOCR 3.7.0, PaddleX 3.7.2, Transformers 5.16.1, and the remaining pinned dependencies from PyPI.
+- PaddleOCR 3.7 uses its supported `transformers` engine on that same PyTorch runtime, avoiding incompatible duplicate Windows cuDNN stacks.
+- DXcam 0.3.0, PaddleX 3.7.2, Transformers 5.16.1, and the remaining pinned dependencies come from PyPI.
 
 Pre-download and disk-warm the OCR and VLM models before a live round:
 
@@ -53,7 +53,7 @@ Pre-download and disk-warm the OCR and VLM models before a live round:
 .\.venv\Scripts\python.exe .\scripts\warm_models.py --config .\config.json
 ```
 
-`Qwen/Qwen3-VL-8B-Instruct` is about 17.5 GB before runtime quantization, so the first download is intentionally an explicit step. NF4 makes it fit comfortably alongside PaddleOCR in 32 GB VRAM. The warm process exits after populating disk caches; the live process still loads the model into VRAM and reaches READY **before** arming capture. Set `vlm.local_files_only` to `true` after the download if live operation must never touch the network.
+`Qwen/Qwen3-VL-32B-Instruct` is the accuracy-first local knowledge model. Its source weights are large, but NF4 lets the live model fit alongside PaddleOCR on the 32 GB RTX 5090. It resolves novel prose/character clues; raw novel emoji submissions remain gated off until locally verified or learned from an authoritative round reveal. The warm process exits after populating disk caches; the live process still loads the model into VRAM and reaches READY **before** arming capture. Set `vlm.local_files_only` to `true` after the download if live operation must never touch the network.
 
 ## 2. Calibrate the DXcam bounding box
 
@@ -95,6 +95,10 @@ The console reports the extracted clue, expected answer type, cache/VLM source, 
 
 ## 4. Run live
 
+After installation and calibration, Windows users can simply double-click `Start Anime Trivia.cmd`. Double-click `Test Anime Trivia.cmd` for a no-keystroke dry run.
+
+The equivalent command-line launch is:
+
 ```powershell
 .\.venv\Scripts\anime-trivia.exe --config .\config.json
 ```
@@ -131,7 +135,7 @@ Valid Qwen answers are appended automatically. Writes go to a temporary file in 
 
 - The sub-0.3 second goal applies to the warmed capture/change/OCR/cache path. Submission intentionally waits for green and then the mandated 0.4–1.1 second human delay; a generative VLM miss is seconds-scale and becomes a pHash/text-cache fast hit next time.
 - DXcam performs the region copy through Desktop Duplication, but exposes a CPU NumPy array. PaddleOCR, Qwen3-VL, and the frame-change gate run on CUDA. The required Python `imagehash` pHash is CPU/SciPy code and normally takes only a few milliseconds; claiming it is GPU-resident would be inaccurate.
-- `video_mode: true` supplies an actual 60 FPS stream even when Discord is static. Duplicate frames are discarded by the CUDA comparison. A localized CUDA tile trigger makes the narrow red→green edit visible even inside a large chat band; three stable frames (about 50 ms at 60 FPS) prevent OCR from firing on a half-scrolled card.
+- `video_mode: true` supplies an actual 60 FPS stream even when Discord is static. Duplicate frames are discarded by the CUDA comparison. A localized CUDA tile trigger makes the narrow red→green edit visible even inside a large chat band; three stable frames (about 50 ms at 60 FPS) prevent OCR from firing on a half-scrolled card. The same accent prelocates the active card before OCR, reducing the measured warmed red-card path from roughly 380 ms on the full chat band to about 60–62 ms.
 - The supplied locked accent is RGB `#ED4245`; ready is `#2ECC70`. Detection also requires a narrow component at least 80 px tall, 3–14 px wide, aspect ratio at least 12, and 60% fill, preventing green/red emoji and chat text from opening the gate.
 - If harmless animation repeatedly triggers OCR, crop more tightly first. If necessary, add relative rectangles to `change_detection.ignore_regions` or raise `mean_absolute_threshold` slightly.
 - If a real card change is missed, lower `mean_absolute_threshold` and `changed_pixel_ratio` gradually.
@@ -142,8 +146,8 @@ Valid Qwen answers are appended automatically. Writes go to a temporary file in 
 
 - [DXcam 0.3 capture API](https://github.com/ra1nty/DXcam/blob/v0.3.0/README.md)
 - [PaddleOCR 3.x OCR pipeline and result fields](https://www.paddleocr.ai/main/en/version3.x/pipeline_usage/OCR.html)
-- [PaddlePaddle Windows GPU installation](https://www.paddlepaddle.org.cn/documentation/docs/zh/install/pip/windows-pip_en.html)
-- [Qwen3-VL-8B-Instruct model card](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)
+- [PaddleOCR Transformers inference engine](https://www.paddleocr.ai/main/en/version3.x/pipeline_usage/OCR.html)
+- [Qwen3-VL-32B-Instruct model card](https://huggingface.co/Qwen/Qwen3-VL-32B-Instruct)
 - [Transformers multimodal chat templates](https://huggingface.co/docs/transformers/chat_templating_multimodal)
 - [Hugging Face bitsandbytes Windows/CUDA support](https://huggingface.co/docs/bitsandbytes/installation)
 - [Python ImageHash pHash/Hamming-distance API](https://github.com/JohannesBuchner/imagehash)

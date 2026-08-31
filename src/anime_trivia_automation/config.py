@@ -76,6 +76,8 @@ class PromptConfig:
     min_text_characters: int = 10
     min_alpha_characters: int = 6
     visual_min_stddev: float = 4.0
+    visual_trim_threshold: float = 18.0
+    visual_trim_padding: int = 8
     crop_padding_x: int = 14
     crop_padding_y: int = 3
     max_header_to_answer_pixels: int = 300
@@ -100,6 +102,9 @@ class ReadinessConfig:
     max_outline_width_pixels: int = 14
     min_outline_aspect_ratio: float = 12.0
     min_outline_fill_ratio: float = 0.60
+    prelocate_active_card: bool = True
+    prelocate_right_extent_pixels: int = 960
+    prelocate_padding_pixels: int = 12
     red_min_channel: int = 140
     green_min_channel: int = 100
     channel_dominance_ratio: float = 1.25
@@ -113,13 +118,14 @@ class ReadinessConfig:
         "get ready",
         "reading time",
     )
+    closed_text_markers: tuple[str, ...] = ("round over",)
 
 
 @dataclass(frozen=True)
 class OcrConfig:
     device: str = "gpu:0"
     require_cuda: bool = True
-    engine: str = "paddle_static"
+    engine: str = "transformers"
     text_detection_model_name: str = "PP-OCRv6_small_det"
     text_recognition_model_name: str = "PP-OCRv6_small_rec"
     recognition_score_threshold: float = 0.35
@@ -139,13 +145,17 @@ class MatchConfig:
 @dataclass(frozen=True)
 class VlmConfig:
     enabled: bool = True
-    model_id: str = "Qwen/Qwen3-VL-8B-Instruct"
+    model_id: str = "Qwen/Qwen3-VL-32B-Instruct"
     device: str = "cuda:0"
     quantization: str = "nf4"
+    allow_novel_visual_submission: bool = False
     local_files_only: bool = False
     ready_before_capture: bool = True
     preload_in_background: bool = False
     max_image_side: int = 768
+    max_visual_upscale_factor: float = 4.0
+    visual_transcription_tokens: int = 64
+    visual_consensus_passes: int = 2
     max_new_tokens: int = 24
     max_answer_characters: int = 96
 
@@ -247,6 +257,8 @@ def load_config(path: str | Path) -> AppConfig:
         min_text_characters=int(prompt_raw.get("min_text_characters", 10)),
         min_alpha_characters=int(prompt_raw.get("min_alpha_characters", 6)),
         visual_min_stddev=float(prompt_raw.get("visual_min_stddev", 4.0)),
+        visual_trim_threshold=float(prompt_raw.get("visual_trim_threshold", 18.0)),
+        visual_trim_padding=int(prompt_raw.get("visual_trim_padding", 8)),
         crop_padding_x=int(prompt_raw.get("crop_padding_x", 14)),
         crop_padding_y=int(prompt_raw.get("crop_padding_y", 3)),
         max_header_to_answer_pixels=int(
@@ -288,6 +300,11 @@ def load_config(path: str | Path) -> AppConfig:
             readiness_raw.get("min_outline_aspect_ratio", 12.0)
         ),
         min_outline_fill_ratio=float(readiness_raw.get("min_outline_fill_ratio", 0.60)),
+        prelocate_active_card=bool(readiness_raw.get("prelocate_active_card", True)),
+        prelocate_right_extent_pixels=int(
+            readiness_raw.get("prelocate_right_extent_pixels", 960)
+        ),
+        prelocate_padding_pixels=int(readiness_raw.get("prelocate_padding_pixels", 12)),
         red_min_channel=int(readiness_raw.get("red_min_channel", 140)),
         green_min_channel=int(readiness_raw.get("green_min_channel", 100)),
         channel_dominance_ratio=float(
@@ -307,12 +324,16 @@ def load_config(path: str | Path) -> AppConfig:
                 "locked_text_markers", ["get ready", "reading time"]
             )
         ),
+        closed_text_markers=tuple(
+            str(value).casefold()
+            for value in readiness_raw.get("closed_text_markers", ["round over"])
+        ),
     )
 
     ocr = OcrConfig(
         device=str(ocr_raw.get("device", "gpu:0")),
         require_cuda=bool(ocr_raw.get("require_cuda", True)),
-        engine=str(ocr_raw.get("engine", "paddle_static")),
+        engine=str(ocr_raw.get("engine", "transformers")),
         text_detection_model_name=str(
             ocr_raw.get("text_detection_model_name", "PP-OCRv6_small_det")
         ),
@@ -336,13 +357,19 @@ def load_config(path: str | Path) -> AppConfig:
 
     vlm = VlmConfig(
         enabled=bool(vlm_raw.get("enabled", True)),
-        model_id=str(vlm_raw.get("model_id", "Qwen/Qwen3-VL-8B-Instruct")),
+        model_id=str(vlm_raw.get("model_id", "Qwen/Qwen3-VL-32B-Instruct")),
         device=str(vlm_raw.get("device", "cuda:0")),
         quantization=str(vlm_raw.get("quantization", "nf4")),
+        allow_novel_visual_submission=bool(
+            vlm_raw.get("allow_novel_visual_submission", False)
+        ),
         local_files_only=bool(vlm_raw.get("local_files_only", False)),
         ready_before_capture=bool(vlm_raw.get("ready_before_capture", True)),
         preload_in_background=bool(vlm_raw.get("preload_in_background", False)),
         max_image_side=int(vlm_raw.get("max_image_side", 768)),
+        max_visual_upscale_factor=float(vlm_raw.get("max_visual_upscale_factor", 4.0)),
+        visual_transcription_tokens=int(vlm_raw.get("visual_transcription_tokens", 64)),
+        visual_consensus_passes=int(vlm_raw.get("visual_consensus_passes", 2)),
         max_new_tokens=int(vlm_raw.get("max_new_tokens", 24)),
         max_answer_characters=int(vlm_raw.get("max_answer_characters", 96)),
     )
@@ -464,6 +491,11 @@ def validate_config(config: AppConfig) -> None:
     if config.prompt.min_text_characters < 1 or config.prompt.min_alpha_characters < 1:
         raise ValueError("prompt text thresholds must be positive")
     if (
+        config.prompt.visual_trim_threshold <= 0
+        or config.prompt.visual_trim_padding < 0
+    ):
+        raise ValueError("prompt visual trim settings are invalid")
+    if (
         min(
             config.prompt.max_header_to_answer_pixels,
             config.prompt.max_answer_to_footer_pixels,
@@ -511,9 +543,14 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("readiness.min_outline_aspect_ratio must exceed 1")
     if not 0.0 < config.readiness.min_outline_fill_ratio <= 1.0:
         raise ValueError("readiness.min_outline_fill_ratio must be between 0 and 1")
+    if config.readiness.prelocate_right_extent_pixels < 200:
+        raise ValueError("readiness.prelocate_right_extent_pixels is too small")
+    if config.readiness.prelocate_padding_pixels < 0:
+        raise ValueError("readiness.prelocate_padding_pixels must be nonnegative")
     if (
         not config.readiness.ready_text_markers
         or not config.readiness.locked_text_markers
+        or not config.readiness.closed_text_markers
     ):
         raise ValueError("readiness text marker lists cannot be empty")
     for index, region in enumerate(config.change_detection.ignore_regions):
@@ -528,6 +565,10 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("ocr.recognition_score_threshold must be between 0 and 1")
     if config.ocr.require_cuda and not config.ocr.device.startswith("gpu"):
         raise ValueError("ocr.device must be a GPU when ocr.require_cuda is true")
+    if config.ocr.engine != "transformers":
+        raise ValueError(
+            "ocr.engine must be 'transformers' so OCR and Qwen share one CUDA runtime"
+        )
     if not 0.0 <= config.matching.text_score_threshold <= 100.0:
         raise ValueError("matching.text_score_threshold must be between 0 and 100")
     if not 0.0 <= config.matching.text_score_margin <= 100.0:
@@ -544,6 +585,12 @@ def validate_config(config: AppConfig) -> None:
             raise ValueError("vlm.device must be CUDA when the VLM is enabled")
         if config.vlm.max_image_side < 64 or config.vlm.max_new_tokens < 1:
             raise ValueError("VLM image/token limits are invalid")
+        if config.vlm.max_visual_upscale_factor < 1.0:
+            raise ValueError("vlm.max_visual_upscale_factor must be at least 1")
+        if config.vlm.visual_transcription_tokens < 8:
+            raise ValueError("vlm.visual_transcription_tokens is too small")
+        if not 2 <= config.vlm.visual_consensus_passes <= 3:
+            raise ValueError("vlm.visual_consensus_passes must be 2 or 3")
         if config.vlm.max_answer_characters < 1:
             raise ValueError("vlm.max_answer_characters must be positive")
     if config.typing.pre_delay_seconds[0] > config.typing.pre_delay_seconds[1]:

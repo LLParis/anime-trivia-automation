@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import re
 import threading
 import time
 from dataclasses import replace
@@ -20,7 +21,7 @@ from .typing import (
     EmergencyStopListener,
     SafeKeyboardExecutor,
 )
-from .utils import LatestMailbox, ensure_directory
+from .utils import LatestMailbox, ensure_directory, sanitize_answer
 from .vlm import LazyQwenResolver
 
 LOGGER = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ class AnimeTriviaAutomation:
             config.matching,
             seed_path=config.runtime.seed_cache_path,
         )
+        self._pending_visual_hashes: dict[str, str] = {}
         self._vlm = LazyQwenResolver(config.vlm)
 
         self._keyboard = SafeKeyboardExecutor(
@@ -130,11 +132,17 @@ class AnimeTriviaAutomation:
 
     def _process_scene(self, scene: Scene) -> None:
         stage_start = time.perf_counter()
-        spans = self._ocr.recognize(scene.frame)
+        ocr_scene, prelocated = self._extractor.crop_to_active_card(scene)
+        spans = self._ocr.recognize(ocr_scene.frame)
+        observation = self._extractor.extract(ocr_scene, spans)
+        if observation is None and prelocated:
+            # Fail back to the broad calibrated band if an unrelated vertical
+            # colored component ever passes the strict prelocator geometry.
+            spans = self._ocr.recognize(scene.frame)
+            observation = self._extractor.extract(scene, spans)
         ocr_ms = (time.perf_counter() - stage_start) * 1000.0
 
         extract_start = time.perf_counter()
-        observation = self._extractor.extract(scene, spans)
         extract_ms = (time.perf_counter() - extract_start) * 1000.0
         if observation is None:
             # A partial render or one OCR miss must never reactivate an older
@@ -156,6 +164,7 @@ class AnimeTriviaAutomation:
             )
             return
         self._save_prompt_crop(observation)
+        self._learn_from_authoritative_reveal(observation, spans)
         LOGGER.info(
             "Prompt %s kind=%s type=%s readiness=%s (red=%d green=%d) hint=%r "
             "OCR=%.1fms extract/hash=%.1fms",
@@ -190,10 +199,24 @@ class AnimeTriviaAutomation:
             )
             LOGGER.info("Fast-path %s hit (%s) -> %s", hit.kind, metric, answer)
         else:
-            vlm_start = time.perf_counter()
-            answer = self._vlm.resolve(observation)
-            vlm_ms = (time.perf_counter() - vlm_start) * 1000.0
-            source = "qwen3-vl"
+            if (
+                observation.prompt_kind == "visual"
+                and not self._config.vlm.allow_novel_visual_submission
+            ):
+                answer = None
+                source = "visual-unverified"
+                if observation.question_label and observation.perceptual_hash:
+                    self._pending_visual_hashes[observation.question_label] = (
+                        observation.perceptual_hash
+                    )
+                LOGGER.warning(
+                    "Novel visual clue held for authoritative reveal learning"
+                )
+            else:
+                vlm_start = time.perf_counter()
+                answer = self._vlm.resolve(observation)
+                vlm_ms = (time.perf_counter() - vlm_start) * 1000.0
+                source = "qwen3-vl"
             if answer is not None:
                 # Cache even if a later scene arrived while the slow path ran; it
                 # becomes a fast hit next time. Stale-scene protection still blocks typing.
@@ -252,6 +275,47 @@ class AnimeTriviaAutomation:
                 ocr_ms + extract_ms + lookup_ms,
                 vlm_ms,
             )
+
+    def _learn_from_authoritative_reveal(
+        self,
+        observation: PromptObservation,
+        spans: tuple[Any, ...],
+    ) -> None:
+        if observation.readiness != "closed" or not observation.question_label:
+            return
+        pending_hash = self._pending_visual_hashes.get(observation.question_label)
+        if pending_hash is None:
+            return
+        for span in spans:
+            match = re.search(
+                r"\bthe answer was\s+(.+?)(?:[.!?](?:\s|$)|$)",
+                span.text,
+                flags=re.IGNORECASE,
+            )
+            if match is None:
+                continue
+            answer = sanitize_answer(
+                match.group(1),
+                self._config.typing.max_answer_characters,
+            )
+            if answer is None:
+                continue
+            try:
+                self._cache.add_image(
+                    pending_hash,
+                    answer,
+                    source="authoritative-round-reveal",
+                )
+            except (OSError, TypeError, ValueError):
+                LOGGER.exception("Could not persist authoritative visual answer")
+                return
+            self._pending_visual_hashes.pop(observation.question_label, None)
+            LOGGER.info(
+                "Learned visual clue %s from authoritative reveal -> %s",
+                observation.question_label,
+                answer,
+            )
+            return
 
     def _save_prompt_crop(self, observation: PromptObservation) -> None:
         if not self._config.runtime.save_prompt_crops:
@@ -385,4 +449,6 @@ def inspect_image(
 
 
 def print_inspection(result: dict[str, Any]) -> None:
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    # Windows PowerShell often uses cp1252; escaped JSON remains printable even
+    # when unrelated chat OCR contains Japanese or other Unicode text.
+    print(json.dumps(result, ensure_ascii=True, indent=2))
