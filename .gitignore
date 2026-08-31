@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+debug/
+config.json
+data/trivia_cache.json
+data/.*.tmp
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.coverage
+*.log

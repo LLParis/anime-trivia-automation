@@ -1,0 +1,82 @@
+{
+  "capture": {
+    "region": [0, 0, 900, 400],
+    "calibrated": false,
+    "device_idx": 0,
+    "output_idx": null,
+    "backend": "dxgi",
+    "processor_backend": "cv2",
+    "fps": 60,
+    "video_mode": true,
+    "max_buffer_len": 4
+  },
+  "change_detection": {
+    "device": "cuda:0",
+    "require_cuda": true,
+    "thumbnail_size": [96, 96],
+    "mean_absolute_threshold": 0.012,
+    "changed_pixel_threshold": 0.055,
+    "changed_pixel_ratio": 0.012,
+    "stable_frames": 3,
+    "ignore_regions": []
+  },
+  "prompt": {
+    "static_hint_roi": null,
+    "min_text_characters": 10,
+    "min_alpha_characters": 6,
+    "visual_min_stddev": 4.0,
+    "crop_padding_x": 14,
+    "crop_padding_y": 3,
+    "header_markers": ["anime guessing game", "get ready"],
+    "answer_markers": ["answer with", "first correct guess"]
+  },
+  "ocr": {
+    "device": "gpu:0",
+    "require_cuda": true,
+    "engine": "paddle_static",
+    "text_detection_model_name": "PP-OCRv6_small_det",
+    "text_recognition_model_name": "PP-OCRv6_small_rec",
+    "recognition_score_threshold": 0.35,
+    "detection_limit_side_len": 960,
+    "warmup_smoke_test": true
+  },
+  "matching": {
+    "text_score_threshold": 88.0,
+    "text_score_margin": 4.0,
+    "phash_size": 16,
+    "phash_max_distance": 10,
+    "phash_distance_margin": 3
+  },
+  "vlm": {
+    "enabled": true,
+    "model_id": "Qwen/Qwen3-VL-8B-Instruct",
+    "device": "cuda:0",
+    "quantization": "nf4",
+    "local_files_only": false,
+    "ready_before_capture": true,
+    "preload_in_background": false,
+    "max_image_side": 768,
+    "max_new_tokens": 24,
+    "max_answer_characters": 96
+  },
+  "typing": {
+    "enabled": true,
+    "expected_process_names": ["Discord.exe"],
+    "expected_window_title_contains": "Discord",
+    "pre_delay_seconds": [0.4, 1.1],
+    "key_delay_seconds": [0.03, 0.08],
+    "respect_detected_countdown": true,
+    "fallback_answer_open_delay_seconds": 5.0,
+    "enter_after_open_slack_seconds": 0.06,
+    "max_answer_characters": 96,
+    "stop_key": "f12"
+  },
+  "runtime": {
+    "cache_path": "data/trivia_cache.json",
+    "seed_cache_path": "data/trivia_cache.seed.json",
+    "debug_dir": "debug",
+    "save_prompt_crops": false,
+    "scene_retry_limit": 1,
+    "log_level": "INFO"
+  }
+}

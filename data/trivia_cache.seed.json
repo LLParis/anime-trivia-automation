@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "text_questions": {
+    "a gentle nature loving robot who is powerful enough to be counted among the world s seven greatest robots": "Mont Blanc",
+    "a gentle wealthy student who films nearly everything and designs elaborate costumes for her magical best friend": "Tomoyo Daidouji",
+    "a red haired ogre warrior who becomes one of a reincarnated slime s most trusted commanders": "Benimaru",
+    "a short haired girl who fiercely protects her deaf older sister and initially distrusts the boy trying to reconnect with her": "Yuzuru Nishimiya",
+    "a small sharp tongued girl nicknamed the palmtop tiger who is rarely seen without a wooden sword": "Taiga Aisaka",
+    "a smiling first year bofurin student who wears an eyepatch and fights with a calm redirection based martial arts style": "Hayato Suo",
+    "a young martial arts prodigy who fights as king kazma inside a vast virtual world": "Kazuma Ikezawa"
+  },
+  "image_hashes": {},
+  "metadata": {
+    "text_questions": {
+      "a gentle nature loving robot who is powerful enough to be counted among the world s seven greatest robots": {
+        "created_utc": "2026-08-31T00:00:00Z",
+        "source": "user-supplied-example"
+      },
+      "a gentle wealthy student who films nearly everything and designs elaborate costumes for her magical best friend": {
+        "created_utc": "2026-08-31T00:00:00Z",
+        "source": "user-supplied-example"
+      },
+      "a red haired ogre warrior who becomes one of a reincarnated slime s most trusted commanders": {
+        "created_utc": "2026-08-31T00:00:00Z",
+        "source": "user-supplied-example"
+      },
+      "a short haired girl who fiercely protects her deaf older sister and initially distrusts the boy trying to reconnect with her": {
+        "created_utc": "2026-08-31T00:00:00Z",
+        "source": "user-supplied-example"
+      },
+      "a small sharp tongued girl nicknamed the palmtop tiger who is rarely seen without a wooden sword": {
+        "created_utc": "2026-08-31T00:00:00Z",
+        "source": "user-supplied-example"
+      },
+      "a smiling first year bofurin student who wears an eyepatch and fights with a calm redirection based martial arts style": {
+        "created_utc": "2026-08-31T00:00:00Z",
+        "source": "user-supplied-example"
+      },
+      "a young martial arts prodigy who fights as king kazma inside a vast virtual world": {
+        "created_utc": "2026-08-31T00:00:00Z",
+        "source": "user-supplied-example"
+      }
+    },
+    "image_hashes": {}
+  }
+}
