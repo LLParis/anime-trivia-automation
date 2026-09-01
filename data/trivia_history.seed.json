@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "source": "Anime Soul question cards paired by descending round number with the bot's authoritative reveal search results",
+  "source": "All four available days of Anime Soul question cards paired chronologically with dated bot reveals; the 3-question mini-round was verified by exact answer searches",
   "captured_utc": "2026-09-01T02:30:00Z",
   "pairs": [
     {"clue": "\"Sometimes living can be hard, but it's only because we're alive that we can make each other laugh, cry, and be happy.\"", "type": "anime_title", "answer": "Fruits Basket"},
@@ -99,6 +99,29 @@
     {"clue": "🌬️ 👊 🏫 🌸", "type": "anime_title", "answer": "Wind Breaker"},
     {"clue": "A retired legendary hitman who now runs a convenience store and has gained considerable weight since leaving the assassin world.", "type": "character", "answer": "Taro Sakamoto"},
     {"clue": "A wild swordsman with an unpredictable fighting style who accompanies two strangers across Edo-period Japan.", "type": "character", "answer": "Mugen"},
-    {"clue": "A girl from the rural town of Itomori who dreams of experiencing life in Tokyo and begins having unusually vivid dreams.", "type": "character", "answer": "Mitsuha Miyamizu"}
+    {"clue": "A girl from the rural town of Itomori who dreams of experiencing life in Tokyo and begins having unusually vivid dreams.", "type": "character", "answer": "Mitsuha Miyamizu"},
+    {"clue": "A quiet wind-magic prodigy carrying a four-leaf grimoire who has competed with his childhood rival since their orphanage days.", "type": "character", "answer": "Yuno Grinberryall"},
+    {"clue": "\"I choose you!\"", "type": "anime_title", "answer": "Pokemon"},
+    {"clue": "🍸 🎭 🎯 ⚖️", "type": "anime_title", "answer": "Death Parade"},
+    {"clue": "\"If someone tells me it's wrong to have hope, I'll tell them they're wrong every single time.\"", "type": "anime_title", "answer": "Puella Magi Madoka Magica"},
+    {"clue": "\"The only ones who should kill are those prepared to be killed.\"", "type": "anime_title", "answer": "Code Geass"},
+    {"clue": "\"When you're young, every day is another chance to become someone new.\"", "type": "anime_title", "answer": "Great Teacher Onizuka"},
+    {"clue": "\"If there aren't any books, I'll just have to make them myself!\"", "type": "anime_title", "answer": "Ascendance of a Bookworm"},
+    {"clue": "An energetic red-haired student at a magical academy who admires the performer Shiny Chariot despite having no magical background.", "type": "character", "answer": "Atsuko Kagari"},
+    {"clue": "A yellow, tentacled teacher who can move at Mach 20 and promises to destroy Earth after teaching Class 3-E.", "type": "character", "answer": "Koro-sensei"},
+    {"clue": "A quiet blue-haired basketball player known as the Phantom Sixth Man because opponents barely notice his presence on the court.", "type": "character", "answer": "Tetsuya Kuroko"},
+    {"clue": "A young prince who leaves his village after receiving a supernatural curse and travels west in search of a cure.", "type": "character", "answer": "Ashitaka"},
+    {"clue": "\"A sound soul dwells within a sound mind and a sound body.\"", "type": "anime_title", "answer": "Soul Eater"},
+    {"clue": "🤖 🪽 🟣 🌇", "type": "anime_title", "answer": "Neon Genesis Evangelion"},
+    {"clue": "🪲 🔥 🚉 🍬", "type": "anime_title", "answer": "Grave of the Fireflies"},
+    {"clue": "A self-proclaimed psychic who runs a consultation office despite having no supernatural powers of his own.", "type": "character", "answer": "Arataka Reigen"},
+    {"clue": "An elegant city-hall employee who secretly works as an assassin under the name Thorn Princess.", "type": "character", "answer": "Yor Forger"},
+    {"clue": "\"Get excited!\"", "type": "anime_title", "answer": "Dr. Stone"},
+    {"clue": "\"I'm going to be the King of the Pirates!\"", "type": "anime_title", "answer": "One Piece"},
+    {"clue": "\"A heart's a heavy burden.\"", "type": "anime_title", "answer": "Howl's Moving Castle"},
+    {"clue": "🧱 🪽 ⚔️ 👹", "type": "anime_title", "answer": "Attack on Titan"},
+    {"clue": "🎨 🟦 🖼️ 🏫", "type": "anime_title", "answer": "Blue Period"},
+    {"clue": "\"The world is filled with life unknown to man.\"", "type": "anime_title", "answer": "Mushishi"},
+    {"clue": "A pale, charismatic man whose calm smile hides the unsettling influence he has over nearly everyone he meets.", "type": "character", "answer": "Johan Liebert"}
   ]
 }

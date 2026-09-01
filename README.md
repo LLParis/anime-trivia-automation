@@ -2,14 +2,14 @@
 
 Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, resolves only from verified local data, drafts the answer while the card is red, and presses Enter only after the same card turns green.
 
-Version 0.5.0 is the post-live-incident repair. The first 6 PM run proved that capture, OCR, and red/green recognition worked, but a single unverified model guess was not a safe answer source. Model-generated submissions are now disabled by default. The primary resolver is a local, server-verified history containing 97 exact clue→answer pairs (including Unicode emoji clues), plus the text and pHash caches.
+Version 0.5.0 is the post-live-incident repair. The first 6 PM run proved that capture, OCR, and red/green recognition worked, but a single unverified model guess was not a safe answer source. Model-generated submissions are now disabled by default. The primary resolver is a local, server-verified history containing 120 exact clue→answer pairs (including Unicode emoji clues), plus the text and pHash caches.
 
 ```text
 DXcam 60 FPS physical-pixel crop
   -> CUDA change/stability gate
   -> PaddleOCR GPU + newest-card/readiness extraction
   -> Discord UI Automation semantic clue read
-       -> authoritative 97-pair history (exact text + exact emoji)
+       -> authoritative 120-pair history (exact text + exact emoji)
        -> fuzzy text cache / strict pHash cache
        -> unknown: no submission; wait for the bot's paired reveal
   -> claim one empty #💜anime-chat composer through UI Automation
@@ -22,7 +22,7 @@ DXcam 60 FPS physical-pixel crop
 
 - Removed all Qwen-generated and incorrectly associated reveal entries from the mutable cache.
 - Corrected the complete 6 PM round from the bot's own reveal messages.
-- Mined 97 conflict-free question/reveal pairs from Anime Soul's indexed Discord history without using a Discord token or API.
+- Mined all 120 cards from the four available days, including a 3-question mini-round, and paired them conflict-free with Anime Soul's bot reveals without using a Discord token or API.
 - Added semantic accessibility lookup, which reads the actual Unicode emoji sequence instead of asking OCR or a vision model to identify it.
 - Disabled unverified model submissions. Qwen3-VL-32B, Qwen3.8-27B Q6, and Gemma 4 31B were tested against the exact failed round and were not accurate enough to authorize live answers.
 - Replaced “Discord is foreground” with exact composer ownership: the only accepted editor is `Message #💜anime-chat`, it must be empty, and its content must equal the macro-owned prefix before each key.
@@ -38,7 +38,7 @@ DXcam 60 FPS physical-pixel crop
 - `src/anime_trivia_automation/cache.py` — authoritative history, fuzzy text, strict pHash, semantic clues, and atomic JSON persistence.
 - `src/anime_trivia_automation/typing.py` — draft-before-green state machine, composer ownership, human-interference detection, and F12 stop.
 - `src/anime_trivia_automation/vlm.py` — experimental local-model resolver; live submission is disabled in config.
-- `data/trivia_history.seed.json` — 97 server-verified clue→answer pairs.
+- `data/trivia_history.seed.json` — 120 server-verified clue→answer pairs.
 - `data/answer_catalog.seed.json` — 207 unique server-observed canonical answer strings for future constrained retrieval work.
 - `data/trivia_cache.seed.json` — reviewed text/pHash starter cache.
 - `data/trivia_cache.json` — ignored mutable cache, repaired from the reviewed seed on launch.
