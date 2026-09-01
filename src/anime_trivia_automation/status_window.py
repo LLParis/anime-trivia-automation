@@ -20,6 +20,8 @@ PHASE_COLORS = {
     "RESOLVING": "#5b8def",
     "NOVEL": "#57f287",
     "DRAFTING": "#8f73ff",
+    "WAITING_DISCORD": "#f0b232",
+    "MANUAL": "#f0b232",
     "WAITING_GREEN": "#fee75c",
     "GREEN": "#2ecc70",
     "SUBMITTED": "#2ecc70",

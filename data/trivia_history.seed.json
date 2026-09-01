@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "source": "All five available days of Anime Soul question cards paired chronologically with dated bot reveals; the 3-question mini-round and September 1 gaps were verified by exact bot-answer searches",
-  "captured_utc": "2026-09-01T15:20:00Z",
+  "source": "Available Anime Soul question cards paired with dated bot reveals or accepted live submissions; unverified manual search answers are excluded",
+  "captured_utc": "2026-09-01T19:15:00Z",
   "pairs": [
     {"clue": "\"Sometimes living can be hard, but it's only because we're alive that we can make each other laugh, cry, and be happy.\"", "type": "anime_title", "answer": "Fruits Basket"},
     {"clue": "🏍️ 💊 🏙️ 💥", "type": "anime_title", "answer": "Akira"},
@@ -132,6 +132,14 @@
     {"clue": "A young woman who recruits two wandering swordsmen to help her search for a samurai who smells of sunflowers.", "type": "character", "answer": "Fuu Kasumi"},
     {"clue": "🏍️ ❄️ 🏚️ 🥫", "type": "anime_title", "answer": "Girls' Last Tour"},
     {"clue": "\"Dedicate your hearts!\"", "type": "anime_title", "answer": "Attack on Titan"},
-    {"clue": "A white-haired orphan who transforms into a tiger under moonlight and joins a supernatural detective agency.", "type": "character", "answer": "Atsushi Nakajima"}
+    {"clue": "A white-haired orphan who transforms into a tiger under moonlight and joins a supernatural detective agency.", "type": "character", "answer": "Atsushi Nakajima"},
+    {"clue": "A cheerful elementary-school student who accidentally releases magical cards from a mysterious book and must recover them.", "type": "character", "answer": "Sakura Kinomoto", "verification": "live-submission-plus-scoreboard-correlation"},
+    {"clue": "A relaxed silver-haired ninja who often reads a small orange book and became the teacher of Team 7.", "type": "character", "answer": "Kakashi Hatake", "verification": "bot-reveal-log"},
+    {"clue": "A struggling manga artist whose ability called Revival sends him backward in time before dangerous incidents.", "type": "character", "answer": "Satoru Fujinuma", "verification": "live-submission-plus-scoreboard-correlation"},
+    {"clue": "💀 🗡️ 🍓 👻", "type": "anime_title", "answer": "Bleach", "verification": "bot-reveal-transcript"},
+    {"clue": "\"Nothing happened.\"", "type": "anime_title", "answer": "One Piece", "verification": "bot-reveal-transcript"},
+    {"clue": "A fashionable art student also known as Yuka who encourages a new painter to take art seriously.", "type": "character", "answer": "Ryuji Ayukawa", "verification": "bot-reveal-transcript"},
+    {"clue": "\"Those who break the rules are scum, but those who abandon their friends are worse than scum.\"", "type": "anime_title", "answer": "Naruto", "verification": "bot-reveal-transcript"},
+    {"clue": "A former government Enforcer with messy dark hair who relentlessly pursues criminals despite his complicated relationship with the system.", "type": "character", "answer": "Shinya Kogami", "verification": "bot-reveal-transcript"}
   ]
 }

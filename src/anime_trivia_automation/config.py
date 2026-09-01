@@ -199,6 +199,7 @@ class TypingConfig:
     draft_while_locked: bool = True
     verify_composer: bool = True
     auto_focus_composer: bool = True
+    foreground_wait_timeout_seconds: float = 55.0
     composer_name_prefix: str = "Message #"
     composer_class_fragment: str = "slateTextArea"
     respect_detected_countdown: bool = True
@@ -448,6 +449,9 @@ def load_config(path: str | Path) -> AppConfig:
         draft_while_locked=bool(typing_raw.get("draft_while_locked", True)),
         verify_composer=bool(typing_raw.get("verify_composer", True)),
         auto_focus_composer=bool(typing_raw.get("auto_focus_composer", True)),
+        foreground_wait_timeout_seconds=float(
+            typing_raw.get("foreground_wait_timeout_seconds", 55.0)
+        ),
         composer_name_prefix=str(
             typing_raw.get("composer_name_prefix", "Message #")
         ),
@@ -808,11 +812,14 @@ def validate_config(config: AppConfig) -> None:
         )
     if config.typing.enter_after_open_slack_seconds < 0:
         raise ValueError("typing.enter_after_open_slack_seconds must be nonnegative")
+    if config.typing.foreground_wait_timeout_seconds <= 0:
+        raise ValueError("typing.foreground_wait_timeout_seconds must be positive")
     timing_values = (
         *config.typing.pre_delay_seconds,
         *config.typing.key_delay_seconds,
         config.typing.fallback_answer_open_delay_seconds,
         config.typing.enter_after_open_slack_seconds,
+        config.typing.foreground_wait_timeout_seconds,
     )
     if not all(math.isfinite(value) for value in timing_values):
         raise ValueError("typing timing values must be finite")
@@ -820,6 +827,10 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("typing.expected_process_names cannot be empty")
     if not config.typing.expected_window_title_contains.strip():
         raise ValueError("typing.expected_window_title_contains cannot be empty")
+    if config.typing.enabled and not config.typing.verify_composer:
+        raise ValueError(
+            "typing.verify_composer must be true whenever live typing is enabled"
+        )
     if config.typing.verify_composer and (
         not config.typing.composer_name_prefix.strip()
         or not config.typing.composer_class_fragment.strip()

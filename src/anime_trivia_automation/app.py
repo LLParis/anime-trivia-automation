@@ -46,6 +46,7 @@ class PendingRound:
     expected_answer_type: str
     prompt_kind: str
     clue: str
+    clue_fingerprint: str
     hashes: set[str] = field(default_factory=set)
     baseline_reveals: Counter[str] = field(default_factory=Counter)
     saw_ready: bool = False
@@ -106,8 +107,8 @@ class AnimeTriviaAutomation:
         )
         self._status.emit(
             "LOADING",
-            title="Verified history ready",
-            detail=f"Loaded {self._cache.history_count} authoritative clues; preparing capture",
+            title="Reviewed history ready",
+            detail=f"Loaded {self._cache.history_count} reviewed clues; preparing capture",
             history_entries=self._cache.history_count,
         )
         self._pending_round: PendingRound | None = None
@@ -152,7 +153,7 @@ class AnimeTriviaAutomation:
             question="—",
             clue="Monitoring #💜anime-chat for a red trivia card",
             answer="—",
-            source=f"{self._cache.history_count} verified local clues",
+            source=f"{self._cache.history_count} reviewed local clues",
             readiness="idle",
             history_entries=self._cache.history_count,
             event_id=f"armed:{self._status_session_id}",
@@ -230,18 +231,38 @@ class AnimeTriviaAutomation:
         return observation.hint_text or "Visual / emoji clue"
 
     def _clue_fingerprint(self, observation: PromptObservation) -> str:
+        accessible_clue = None
         if (
             self._accessible_round is not None
             and self._accessible_round[0] == observation.signature
         ):
-            return "semantic:" + normalize_accessible_clue(
-                self._accessible_round[1]
-            )
-        if observation.prompt_kind == "visual" and observation.perceptual_hash:
+            accessible_clue = self._accessible_round[1]
+        clue = accessible_clue or observation.hint_text or "Visual / emoji clue"
+        if (
+            accessible_clue is None
+            and observation.prompt_kind == "visual"
+            and observation.perceptual_hash
+        ):
             return f"visual:{observation.perceptual_hash}"
-        return "text:" + normalize_accessible_clue(
-            observation.hint_text or "Visual / emoji clue"
+        effective_kind = self._effective_prompt_kind(observation.prompt_kind, clue)
+        if effective_kind == "text":
+            return "text:" + normalize_question(self._canonical_text_clue(clue))
+        if accessible_clue is None and observation.perceptual_hash:
+            return f"visual:{observation.perceptual_hash}"
+        return "semantic:" + normalize_accessible_clue(clue)
+
+    @staticmethod
+    def _canonical_text_clue(clue: str) -> str:
+        """Remove only a punctuation-delimited single-glyph OCR suffix."""
+
+        # OCR occasionally appends one stray glyph after a complete sentence
+        # (`...scum. T` / `...scum. 1`). Meaningful endings such as Team 7,
+        # Class A, Level E, and Dragon Ball Z do not match this narrow shape.
+        artifact = re.fullmatch(
+            r"(?s)(.+[.!?][\"\u201d\u2019']?)\s+[A-Za-z0-9]",
+            clue.strip(),
         )
+        return artifact.group(1) if artifact is not None else clue
 
     def _on_visual_change(self, generation: int) -> None:
         # Pause any in-progress input immediately. OCR will either revalidate
@@ -509,7 +530,7 @@ class AnimeTriviaAutomation:
             }:
                 attempt_key = (
                     round_token,
-                    normalize_accessible_clue(novel_clue),
+                    clue_fingerprint,
                 )
                 source = "qwen38-retrieval-consensus"
                 if attempt_key in self._novel_attempted:
@@ -708,8 +729,7 @@ class AnimeTriviaAutomation:
     def _match_authoritative_history(
         self, observation: PromptObservation
     ) -> CacheHit | None:
-        allowed, _reason = self._foreground_guard.allowed()
-        window = self._foreground_guard.current() if allowed else None
+        window = self._foreground_guard.expected_window()
         if window is None:
             return None
         try:
@@ -780,24 +800,30 @@ class AnimeTriviaAutomation:
         if not observation.question_label:
             return
         clue = observation.hint_text
+        semantic_clue = False
         if (
             self._accessible_round is not None
             and self._accessible_round[0] == observation.signature
         ):
             clue = self._accessible_round[1]
+            semantic_clue = True
+        clue_fingerprint = self._clue_fingerprint(observation)
+        effective_prompt_kind = (
+            self._effective_prompt_kind(observation.prompt_kind, clue)
+            if semantic_clue
+            else observation.prompt_kind
+        )
+        if effective_prompt_kind == "text":
+            clue = self._canonical_text_clue(clue)
         if (
             self._pending_round is None
             or self._pending_round.signature != observation.signature
-            or normalize_accessible_clue(self._pending_round.clue)
-            != normalize_accessible_clue(clue)
+            or self._pending_round.clue_fingerprint != clue_fingerprint
         ):
             full_spans = self._ocr.recognize(full_scene.frame)
             baseline = Counter(
                 normalized
                 for normalized, _answer, _top, _left in self._reveal_records(full_spans)
-            )
-            effective_prompt_kind = self._effective_prompt_kind(
-                observation.prompt_kind, clue
             )
             self._pending_round = PendingRound(
                 signature=observation.signature,
@@ -805,6 +831,7 @@ class AnimeTriviaAutomation:
                 expected_answer_type=observation.expected_answer_type,
                 prompt_kind=effective_prompt_kind,
                 clue=clue,
+                clue_fingerprint=clue_fingerprint,
                 hashes=(
                     {observation.perceptual_hash}
                     if observation.perceptual_hash
@@ -841,8 +868,7 @@ class AnimeTriviaAutomation:
             return
 
         semantic_continuity = False
-        allowed, _reason = self._foreground_guard.allowed()
-        window = self._foreground_guard.current() if allowed else None
+        window = self._foreground_guard.expected_window()
         if window is not None and pending.clue:
             try:
                 current = self._question_locator.find_question(
@@ -978,7 +1004,7 @@ class AnimeTriviaAutomation:
 
     def run(self) -> None:
         LOGGER.info(
-            "Starting Anime Trivia Automation%s. Keep Anime Soul Discord in the foreground; the composer is verified automatically. Press %s to stop.",
+            "Starting Anime Trivia Automation%s. Gemini may stay foreground while answers resolve; return to the empty Anime Soul composer before the round closes. Press %s to stop.",
             " in DRY RUN mode" if not self._config.typing.enabled else "",
             self._config.typing.stop_key.upper(),
         )

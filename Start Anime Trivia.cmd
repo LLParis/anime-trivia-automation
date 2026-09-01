@@ -19,7 +19,7 @@ if not exist "config.json" (
 
 echo Loading local OCR, verified history, and Qwen3.8. Capture starts only after READY.
 echo The top-right status panel shows every live decision and never accepts input.
-echo Keep Anime Soul #anime-chat foregrounded and press F12 to stop.
+echo You can use Gemini while it runs; return to empty Anime Soul #anime-chat before the round closes. Press F12 to stop.
 echo.
 ".venv\Scripts\anime-trivia.exe" --config "config.json"
 echo.

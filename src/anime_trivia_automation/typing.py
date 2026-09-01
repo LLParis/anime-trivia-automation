@@ -41,13 +41,10 @@ class ForegroundWindowGuard:
         }
         self._title_fragment = config.expected_window_title_contains.casefold()
 
-    def current(self) -> ForegroundWindow | None:
-        if os.name != "nt":
-            return None
+    @staticmethod
+    def _windows_api() -> tuple[Any, Any]:
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        user32.GetForegroundWindow.argtypes = []
-        user32.GetForegroundWindow.restype = wintypes.HWND
         user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
         user32.GetWindowTextLengthW.restype = ctypes.c_int
         user32.GetWindowTextW.argtypes = [
@@ -72,16 +69,20 @@ class ForegroundWindowGuard:
         kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd:
-            return None
+        return user32, kernel32
 
+    def _describe(self, hwnd: int) -> ForegroundWindow | None:
+        if not hwnd or os.name != "nt":
+            return None
+        user32, kernel32 = self._windows_api()
         title_length = user32.GetWindowTextLengthW(hwnd)
         title_buffer = ctypes.create_unicode_buffer(title_length + 1)
         user32.GetWindowTextW(hwnd, title_buffer, len(title_buffer))
 
         process_id = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        if not process_id.value:
+            return None
         handle = kernel32.OpenProcess(
             self.PROCESS_QUERY_LIMITED_INFORMATION, False, process_id.value
         )
@@ -102,6 +103,66 @@ class ForegroundWindowGuard:
             process_name=process_name,
             title=title_buffer.value,
         )
+
+    def current(self) -> ForegroundWindow | None:
+        if os.name != "nt":
+            return None
+        user32, _kernel32 = self._windows_api()
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        hwnd = user32.GetForegroundWindow()
+        return self._describe(int(hwnd)) if hwnd else None
+
+    def visible_windows(self) -> tuple[ForegroundWindow, ...]:
+        """Read visible top-level windows without activating or focusing any of them."""
+
+        if os.name != "nt":
+            return ()
+        user32, _kernel32 = self._windows_api()
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        handles: list[int] = []
+        callback_type = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+        )
+
+        @callback_type
+        def collect(hwnd: int, _lparam: int) -> bool:
+            if user32.IsWindowVisible(hwnd):
+                handles.append(int(hwnd))
+            return True
+
+        user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
+        if not user32.EnumWindows(collect, 0):
+            return ()
+        windows = []
+        for hwnd in handles:
+            window = self._describe(hwnd)
+            if window is not None:
+                windows.append(window)
+        return tuple(windows)
+
+    def expected_window(self) -> ForegroundWindow | None:
+        """Find one unambiguous Discord window without changing foreground state."""
+
+        foreground = self.current()
+        allowed, _reason = self.validate(foreground)
+        if allowed and foreground is not None:
+            return foreground
+
+        matches = [
+            window for window in self.visible_windows() if self.validate(window)[0]
+        ]
+        unique = {window.hwnd: window for window in matches}
+        if len(unique) != 1:
+            if len(unique) > 1:
+                LOGGER.warning(
+                    "Background Discord read skipped: %d matching windows",
+                    len(unique),
+                )
+            return None
+        return next(iter(unique.values()))
 
     def validate(self, window: ForegroundWindow | None) -> tuple[bool, str]:
         if window is None:
@@ -363,6 +424,30 @@ class SafeKeyboardExecutor:
         self._controller = Controller()
         self._enter_key = Key.enter
         self._orphaned_draft: str | None = None
+        self._suppression_lock = threading.Lock()
+        self._suppressed_rounds: set[str] = set()
+
+    @staticmethod
+    def _suppression_key(task: AnswerTask) -> str:
+        return task.round_token or task.prompt_signature
+
+    def suppress_task(self, task: AnswerTask, reason: str) -> None:
+        with self._suppression_lock:
+            self._suppressed_rounds.add(self._suppression_key(task))
+        LOGGER.info("Automation suppressed for this round: %s", reason)
+
+    def is_suppressed(self, task: AnswerTask) -> bool:
+        with self._suppression_lock:
+            return self._suppression_key(task) in self._suppressed_rounds
+
+    def observe_prompt(
+        self, signature: str | None, clue_fingerprint: str | None
+    ) -> None:
+        """Clear bounded per-quiz suppression when the tracked quiz ends."""
+
+        with self._suppression_lock:
+            if signature is None:
+                self._suppressed_rounds.clear()
 
     def _remember_orphan(self, expected_prefix: str) -> None:
         if expected_prefix:
@@ -406,28 +491,38 @@ class SafeKeyboardExecutor:
 
     def _claim_empty_composer(
         self, window: ForegroundWindow
-    ) -> DiscordComposer | None:
+    ) -> tuple[DiscordComposer | None, bool]:
         if not self._config.verify_composer:
-            return None
+            return None, False
         composer = self._composer_locator.find(window.hwnd, window.process_id)
         if composer is None:
-            return None
+            return None, False
         if composer.value() != "":
             LOGGER.warning("Typing skipped: Discord composer is not empty")
-            return None
+            return None, True
         if not composer.focused() and self._config.auto_focus_composer:
+            current = self._guard.current()
+            allowed, _reason = self._guard.validate(current)
+            if not allowed or current is None or current.hwnd != window.hwnd:
+                LOGGER.warning("Composer focus blocked because Discord lost foreground")
+                return None, False
             composer.set_focus()
             deadline = time.monotonic() + 0.25
             while time.monotonic() < deadline and not composer.focused():
                 time.sleep(0.01)
         if not composer.focused():
             LOGGER.warning("Typing skipped: Discord composer is not focused")
-            return None
+            return None, False
         if composer.value() != "":
             LOGGER.warning("Typing skipped: Discord composer changed while claiming it")
-            return None
+            return None, True
+        current = self._guard.current()
+        allowed, _reason = self._guard.validate(current)
+        if not allowed or current is None or current.hwnd != window.hwnd:
+            LOGGER.warning("Composer claim canceled because Discord lost foreground")
+            return None, False
         LOGGER.info("Claimed empty Discord composer %r", composer.name)
-        return composer
+        return composer, False
 
     def _clear_owned_draft(
         self, composer: DiscordComposer | None, expected_prefix: str
@@ -491,26 +586,182 @@ class SafeKeyboardExecutor:
                 return False
         return True
 
-    def _wait_until_open(
-        self, deadline: float, signature: str, clue_fingerprint: str = ""
-    ) -> bool:
-        while True:
+    def _wait_pre_delay(
+        self,
+        deadline: float,
+        task: AnswerTask,
+        window: ForegroundWindow,
+        composer: DiscordComposer | None,
+    ) -> str:
+        """Monitor manual ownership continuously before the first character."""
+
+        while not self._stop_event.is_set():
+            if not self._active_prompt.is_open(
+                task.prompt_signature, task.clue_fingerprint
+            ):
+                return "retry"
+            current = self._guard.current()
+            allowed, _reason = self._guard.validate(current)
+            if not allowed or current is None or current.hwnd != window.hwnd:
+                return "retry"
+            if composer is not None:
+                try:
+                    value = composer.value()
+                    if value != "":
+                        return "manual"
+                    if not composer.focused():
+                        return "retry"
+                except Exception:
+                    LOGGER.debug(
+                        "Discord composer rerendered during pre-delay",
+                        exc_info=True,
+                    )
+                    return "retry"
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return self._still_open(
-                    signature, clue_fingerprint, check_window=False
-                )
-            if self._stop_event.wait(min(remaining, 0.05)):
-                return False
+                return "ready"
+            if self._stop_event.wait(min(remaining, 0.005)):
+                return "stopped"
+        return "stopped"
+
+    def _mark_manual_round(
+        self, task: AnswerTask, answer: str, event_token: str
+    ) -> None:
+        self.suppress_task(task, "manual Discord text was detected")
+        self._status.emit(
+            "MANUAL",
+            title=f"Manual answer active — {task.question_label or 'Question'}",
+            detail="Your composer text is untouched; automation is off for this round",
+            question=task.question_label or "Question",
+            answer=answer,
+            source=task.source,
+            event_id=f"{event_token}:manual",
+        )
+
+    def _expire_safe_wait(
+        self, task: AnswerTask, answer: str, event_token: str
+    ) -> None:
+        LOGGER.info("Foreground Discord wait expired")
+        self.suppress_task(task, "the bounded foreground wait expired")
+        self._status.emit(
+            "ATTENTION",
+            title="Solved answer expired",
+            detail="Discord did not return before the safe wait ended",
+            question=task.question_label or "Question",
+            answer=answer,
+            source=task.source,
+            event_id=f"{event_token}:foreground-timeout",
+        )
+
+    def _wait_for_safe_composer(
+        self,
+        task: AnswerTask,
+        answer: str,
+        event_token: str,
+    ) -> tuple[ForegroundWindow | None, DiscordComposer | None, bool]:
+        """Wait passively for the exact live round, window, channel, and composer."""
+
+        deadline = time.monotonic() + self._config.foreground_wait_timeout_seconds
+        last_detail = ""
+        while not self._stop_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._expire_safe_wait(task, answer, event_token)
+                return None, None, False
+
+            # If another app covers the calibrated card, capture becomes
+            # uncertain. Wait through that interval and require a fresh exact
+            # signature/fingerprint observation before any composer access.
             if not self._active_prompt.wait_current_open(
-                signature,
+                task.prompt_signature,
                 self._stop_event,
-                clue_fingerprint=clue_fingerprint,
+                timeout=remaining,
+                clue_fingerprint=task.clue_fingerprint,
             ):
-                return False
+                if (
+                    not self._stop_event.is_set()
+                    and time.monotonic() >= deadline
+                ):
+                    self._expire_safe_wait(task, answer, event_token)
+                    return None, None, False
+                LOGGER.info("Foreground wait canceled because the round changed")
+                return None, None, False
+
+            window = self._guard.current()
+            allowed, reason = self._guard.validate(window)
+            detail = "Continue manual research; return to the empty Discord composer"
+            if allowed and window is not None:
+                try:
+                    if self._orphaned_draft:
+                        self._cleanup_orphan()
+                        if self._orphaned_draft:
+                            detail = (
+                                "Open #💜anime-chat so the prior owned draft can clear"
+                            )
+                        else:
+                            # Cleanup either succeeded or discovered user-owned
+                            # content. Inspect the fresh composer next iteration.
+                            continue
+                    elif not self._config.verify_composer:
+                        return window, None, False
+                    else:
+                        composer, manual_text_detected = self._claim_empty_composer(
+                            window
+                        )
+                        if manual_text_detected:
+                            return window, None, True
+                        if composer is not None:
+                            # Recheck both logical identity and the exact HWND after
+                            # UIA lookup/focus, before the first possible key.
+                            if not self._active_prompt.wait_current_open(
+                                task.prompt_signature,
+                                self._stop_event,
+                                timeout=min(remaining, 1.0),
+                                clue_fingerprint=task.clue_fingerprint,
+                            ):
+                                return None, None, False
+                            current = self._guard.current()
+                            current_allowed, _current_reason = self._guard.validate(
+                                current
+                            )
+                            if (
+                                current_allowed
+                                and current is not None
+                                and current.hwnd == window.hwnd
+                            ):
+                                LOGGER.info(
+                                    "Foreground Discord composer is safe; resuming answer"
+                                )
+                                return window, composer, False
+                        detail = "Switch to the empty #💜anime-chat message box"
+                except Exception:
+                    LOGGER.debug(
+                        "Discord composer rerendered during safe wait",
+                        exc_info=True,
+                    )
+                    detail = "Discord is re-rendering; keeping the answer pending"
+
+            if detail != last_detail:
+                LOGGER.info("Answer ready; waiting safely: %s (%s)", detail, reason)
+                self._status.emit(
+                    "WAITING_DISCORD",
+                    title=f"Answer ready — {task.question_label or 'Question'}",
+                    detail=detail,
+                    question=task.question_label or "Question",
+                    answer=answer,
+                    source=task.source,
+                    readiness="waiting-foreground",
+                    event_id=f"{event_token}:foreground:{detail}",
+                )
+                last_detail = detail
+            if self._stop_event.wait(min(remaining, 0.05)):
+                return None, None, False
+        return None, None, False
 
     def execute(self, task: AnswerTask) -> bool:
         event_token = task.round_token or task.prompt_signature
+        if self.is_suppressed(task):
+            return False
         answer = sanitize_answer(task.answer, self._config.max_answer_characters)
         if answer is None:
             LOGGER.warning("Rejected unsafe/empty answer: %r", task.answer)
@@ -530,19 +781,6 @@ class SafeKeyboardExecutor:
             )
             return True
 
-        if not self._cleanup_orphan():
-            LOGGER.warning("Typing skipped until the previous owned draft is resolved")
-            self._status.emit(
-                "ATTENTION",
-                title="Waiting for safe draft cleanup",
-                detail="A prior owned draft must be resolved before typing",
-                question=task.question_label or "Question",
-                answer=answer,
-                source=task.source,
-                event_id=f"{event_token}:orphan",
-            )
-            return False
-
         if (
             self._readiness_config.require_green_outline
             and not self._config.draft_while_locked
@@ -556,46 +794,37 @@ class SafeKeyboardExecutor:
                 LOGGER.warning("Green-outline gate timed out or the round changed")
                 return False
 
-        window = self._guard.current()
-        allowed, reason = self._guard.validate(window)
-        if not allowed or window is None:
-            LOGGER.warning("Typing skipped: %s", reason)
-            self._status.emit(
-                "ATTENTION",
-                title="Discord is not ready",
-                detail=reason,
-                question=task.question_label or "Question",
-                answer=answer,
-                source=task.source,
-                event_id=f"{event_token}:foreground",
-            )
-            return False
-        composer = self._claim_empty_composer(window)
-        if self._config.verify_composer and composer is None:
-            self._status.emit(
-                "ATTENTION",
-                title="Composer safety check blocked typing",
-                detail="Use the empty #💜anime-chat message box",
-                question=task.question_label or "Question",
-                answer=answer,
-                source=task.source,
-                event_id=f"{event_token}:composer",
-            )
-            return False
-
-        pre_delay = random.uniform(*self._config.pre_delay_seconds)
         delays = [random.uniform(*self._config.key_delay_seconds) for _ in answer]
-        start_at = time.monotonic() + pre_delay
-        LOGGER.info(
-            "Humanized draft scheduled: answer=%r pre-delay=%.3fs type≈%.3fs",
-            answer,
-            pre_delay,
-            sum(delays),
-        )
-        if not self._wait_until_open(
-            start_at, task.prompt_signature, task.clue_fingerprint
-        ):
-            LOGGER.info("Draft canceled before typing because the prompt changed")
+        while not self._stop_event.is_set():
+            window, composer, manual_text_detected = self._wait_for_safe_composer(
+                task, answer, event_token
+            )
+            if window is None:
+                return False
+            if manual_text_detected:
+                self._mark_manual_round(task, answer, event_token)
+                return False
+
+            pre_delay = random.uniform(*self._config.pre_delay_seconds)
+            start_at = time.monotonic() + pre_delay
+            LOGGER.info(
+                "Humanized draft scheduled: answer=%r pre-delay=%.3fs type≈%.3fs",
+                answer,
+                pre_delay,
+                sum(delays),
+            )
+            pre_delay_result = self._wait_pre_delay(
+                start_at, task, window, composer
+            )
+            if pre_delay_result == "ready":
+                break
+            if pre_delay_result == "manual":
+                self._mark_manual_round(task, answer, event_token)
+                return False
+            if pre_delay_result == "stopped":
+                return False
+            LOGGER.info("Pre-delay lost safe ownership; returning to passive wait")
+        else:
             return False
 
         typed_characters = 0
@@ -623,6 +852,16 @@ class SafeKeyboardExecutor:
             typed_characters += 1
 
         if not should_continue():
+            if composer is not None:
+                try:
+                    manual_text_detected = composer.value() != ""
+                except Exception:
+                    self.suppress_task(
+                        task, "composer ownership became ambiguous before typing"
+                    )
+                    return False
+                if manual_text_detected:
+                    self._mark_manual_round(task, answer, event_token)
             return False
         self._status.emit(
             "DRAFTING",
@@ -664,10 +903,12 @@ class SafeKeyboardExecutor:
                 source=task.source,
                 event_id=f"{event_token}:character-ambiguous",
             )
+            self.suppress_task(task, "character injection became ambiguous")
             return False
         if not draft_completed:
             LOGGER.info("Draft canceled while typing")
             self._clear_or_remember(composer, answer[:typed_characters])
+            self.suppress_task(task, "focus or composer ownership changed mid-draft")
             return False
         if composer is not None:
             try:
@@ -682,6 +923,7 @@ class SafeKeyboardExecutor:
             if not complete_draft:
                 LOGGER.warning("Composer did not contain the exact completed macro draft")
                 self._clear_or_remember(composer, answer[:typed_characters])
+                self.suppress_task(task, "completed composer content diverged")
                 return False
 
         if self._readiness_config.require_green_outline:
@@ -760,6 +1002,7 @@ class SafeKeyboardExecutor:
             dispatched = dispatch_enter_if_owned()
         if not dispatched:
             self._clear_or_remember(composer, answer)
+            self.suppress_task(task, "final ownership or green-state check failed")
             return False
 
         self._status.emit(
@@ -841,9 +1084,12 @@ class AnswerDispatcher:
         self._executor = executor
         self._active_prompt = active_prompt
         self._stop_event = stop_event
-        self._queue: queue.Queue[AnswerTask] = queue.Queue(maxsize=4)
+        # One worker may be waiting on Chrome/Gemini. Keep only the newest
+        # queued observation behind it so OCR corrections cannot fill a FIFO
+        # with stale fingerprints or crowd out the current clue.
+        self._queue: queue.Queue[AnswerTask] = queue.Queue(maxsize=1)
         self._lock = threading.Lock()
-        self._pending: set[str] = set()
+        self._pending: set[tuple[str, str]] = set()
         self._last_answered: str | None = None
         self._thread = threading.Thread(
             target=self._run, name="answer-dispatcher", daemon=True
@@ -863,6 +1109,7 @@ class AnswerDispatcher:
             signature, readiness, generation, clue_fingerprint
         ):
             return False
+        self._executor.observe_prompt(signature, clue_fingerprint)
         with self._lock:
             # A single transient OCR miss (None) must cancel pending typing but
             # must not re-arm an already answered clue. Rearm only after a
@@ -876,26 +1123,43 @@ class AnswerDispatcher:
         return True
 
     def submit(self, task: AnswerTask) -> bool:
+        if self._executor.is_suppressed(task):
+            return False
         if not self._active_prompt.is_open(
             task.prompt_signature, task.clue_fingerprint
         ):
             LOGGER.debug("Rejected answer task for a non-live prompt")
             return False
+        task_key = (task.prompt_signature, task.clue_fingerprint)
         with self._lock:
             if (
-                task.prompt_signature in self._pending
+                task_key in self._pending
                 or task.prompt_signature == self._last_answered
             ):
                 return False
-            self._pending.add(task.prompt_signature)
+            self._pending.add(task_key)
         try:
             self._queue.put_nowait(task)
             return True
         except queue.Full:
+            try:
+                stale = self._queue.get_nowait()
+            except queue.Empty:
+                stale = None
             with self._lock:
-                self._pending.discard(task.prompt_signature)
-            LOGGER.warning("Answer queue full; dropping stale candidate")
-            return False
+                if stale is not None:
+                    self._pending.discard(
+                        (stale.prompt_signature, stale.clue_fingerprint)
+                    )
+            try:
+                self._queue.put_nowait(task)
+            except queue.Full:
+                with self._lock:
+                    self._pending.discard(task_key)
+                LOGGER.warning("Latest answer slot raced; candidate will retry")
+                return False
+            LOGGER.debug("Replaced one stale queued answer with the latest clue")
+            return True
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
@@ -908,13 +1172,31 @@ class AnswerDispatcher:
                     LOGGER.debug("Orphan-draft service failed", exc_info=True)
                 continue
             succeeded = False
+            with self._lock:
+                already_answered = task.prompt_signature == self._last_answered
+            if already_answered or self._executor.is_suppressed(task):
+                with self._lock:
+                    self._pending.discard(
+                        (task.prompt_signature, task.clue_fingerprint)
+                    )
+                continue
+            if not self._active_prompt.is_open(
+                task.prompt_signature, task.clue_fingerprint
+            ):
+                with self._lock:
+                    self._pending.discard(
+                        (task.prompt_signature, task.clue_fingerprint)
+                    )
+                continue
             try:
                 succeeded = self._executor.execute(task)
             except Exception:
                 LOGGER.exception("Keyboard execution failed")
             finally:
                 with self._lock:
-                    self._pending.discard(task.prompt_signature)
+                    self._pending.discard(
+                        (task.prompt_signature, task.clue_fingerprint)
+                    )
                     if succeeded:
                         self._last_answered = task.prompt_signature
 

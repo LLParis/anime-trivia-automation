@@ -2,14 +2,14 @@
 
 Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, uses verified local history first and retrieval-grounded local Qwen3.8 for genuinely new clues, drafts during red, and presses Enter only after the same card turns green.
 
-Version 0.7.0 adds the missing novel-question product path after the September 1 run correctly detected all ten cards but deliberately answered none. The resolver now starts the installed Qwen3.8-27B Q6 model itself, plans multiple evidence searches, retrieves local AniList/quote/alias evidence plus Wikipedia and web results, synthesizes the requested character name or anime title, and runs a conservative evidence verifier before drafting. All ten September 1 bot reveals expand exact history to 130 clues; model answers remain round-local until the bot reveal verifies them.
+Version 0.7.1 makes the automated and manual Gemini paths coexist. A solved answer now remains visibly pending while Chrome is foreground and resumes only after the user returns to an empty Discord composer; the app never activates Discord or overwrites manual text. Read-only background UI Automation keeps exact text/emoji identity available while another app has focus, and punctuation-bounded OCR suffix noise no longer invalidates a solved text clue. Six noon clues came from explicit bot reveals, while two additional text clues are labeled separately as live submission/scoreboard correlations; together they expand exact history to 138 entries and the canonical answer catalog to 220.
 
 ```text
 DXcam 60 FPS physical-pixel crop
   -> CUDA change/stability gate
   -> PaddleOCR GPU + newest-card/readiness extraction
   -> Discord UI Automation semantic clue read
-       -> authoritative 130-pair history (exact text + exact emoji)
+       -> reviewed 138-pair history (exact text + exact emoji)
        -> fuzzy text cache / strict pHash cache
        -> unseen clue: parallel retrieval + hot Qwen3.8 synthesis + verifier
        -> unresolved/low-confidence: no submission; wait for paired reveal
@@ -25,12 +25,14 @@ DXcam 60 FPS physical-pixel crop
 - Corrected the complete 6 PM round from the bot's own reveal messages.
 - Mined all 120 cards from the four available days, including a 3-question mini-round, and paired them conflict-free with Anime Soul's bot reveals without using a Discord token or API.
 - Added semantic accessibility lookup, which reads the actual Unicode emoji sequence instead of asking OCR or a vision model to identify it.
+- Semantic clue and reveal reads can now inspect the one unambiguous Discord window in the background without activating, focusing, or typing into it.
 - Replaced raw model guessing with retrieval-grounded Qwen3.8. Raw Qwen confidently missed several September 1 character clues; evidence retrieval plus verification resolved the five novel clues not promoted into history as Yuki Sohma, Dragon Ball Z, Akane Tsunemori, Initial D, and InuYasha in 3.4–3.7 seconds each.
 - The app owns a loopback-only llama.cpp Q6 server, warms it before capture, and stops only that owned process on F12/Ctrl+C. Q4 KV cache keeps combined OCR/model desktop usage near 27.2 GiB on the 32 GiB RTX 5090.
 - Added a locked-Q1 session-start latch so historical green cards cannot reactivate a completed or newly launched worker.
 - Treats short accessible quotes such as “Sit, boy!” as text for reveal learning even when OCR geometry labels their crop visual.
 - Replaced “Discord is foreground” with exact composer ownership: the only accepted editor is `Message #💜anime-chat`, it must be empty, and its content must equal the macro-owned prefix before each key.
 - Drafts are typed during the five-second red reading window. Enter remains blocked until green, preserving the timing rule without losing long answers to the observed 0.8–2.0 second winners.
+- If Chrome/Gemini is foreground when an answer resolves, the panel shows `WAITING DISCORD` with the answer and holds the task until Discord manually returns, the round closes, the clue changes, F12 is pressed, or the 55-second safety bound expires.
 - Closed cards return before lookup or submission. Post-quiz scrolling is inert.
 - Reveal learning is one transaction per live round: it records the pre-existing reveal baseline, requires a witnessed green state, same-card continuity, a nearby official result marker, and exactly one new answer.
 
@@ -46,8 +48,8 @@ DXcam 60 FPS physical-pixel crop
 - `src/anime_trivia_automation/novel.py` — managed llama.cpp lifecycle, diverse retrieval, Qwen3.8 synthesis, verification, canonicalization, and per-session caching.
 - `src/anime_trivia_automation/knowledge.py` — read-only exact-quote and FTS5 access to the local source-attributed anime index.
 - `src/anime_trivia_automation/vlm.py` — experimental local-model resolver; live submission is disabled in config.
-- `data/trivia_history.seed.json` — 130 server-verified clue→answer pairs.
-- `data/answer_catalog.seed.json` — 215 server-observed canonical answer strings used for spelling canonicalization.
+- `data/trivia_history.seed.json` — 138 reviewed clue→answer pairs with explicit provenance on the new noon entries.
+- `data/answer_catalog.seed.json` — 220 bot-observed or accepted-live canonical answer strings used for spelling canonicalization.
 - `data/trivia_cache.seed.json` — reviewed text/pHash starter cache.
 - `data/trivia_cache.json` — ignored mutable cache, repaired from the reviewed seed on launch.
 - `scripts/replay_screenshots.py` — one-warmup offline replay of saved cards.
@@ -112,9 +114,9 @@ Double-click `Start Anime Trivia.cmd`, or run:
 .\.venv\Scripts\anime-trivia.exe --config .\config.json
 ```
 
-It is safe to start early. Leave the launcher open and keep Anime Soul's `#💜anime-chat` foregrounded during a round. The app locates and focuses the exact message composer itself; it refuses Discord search, another channel, a nonempty editor, or an editor modified by a human.
+It is safe to start early. Leave the launcher open. You may switch to Chrome/Gemini for a manual lookup while the resolver continues; the panel displays any solved answer and waits passively. Return to Anime Soul's `#💜anime-chat` before the round closes. The app then locates and focuses the exact message composer inside the already-foreground Discord window; it refuses Discord search, another channel, a nonempty editor, or an editor modified by a human.
 
-Do not type manually in the composer while the macro owns a draft. During red, other users may see Discord's normal “typing…” indicator, but nothing is submitted. On green, the app rechecks the round, foreground window, focused editor, and complete draft before pressing Enter. Press F12 at any time to stop.
+Manual text always wins: if you have already begun typing in Discord, the app leaves it untouched and does not press Enter. Do not add text after the panel changes to `DRAFTING`, because the app already owns that exact prefix; any interference cancels automation without erasing the user-modified content. During red, other users may see Discord's normal “typing…” indicator, but nothing is submitted. On green, the app rechecks the round, foreground window, focused editor, and complete draft before pressing Enter. Press F12 at any time to stop.
 
 ## Operator status panel
 
@@ -125,7 +127,7 @@ The panel reports:
 - `LOADING` and `ARMED` startup state;
 - question number, clue, and red/green/closed readiness;
 - `KNOWN`, `RESOLVING`, `NOVEL`, or `UNKNOWN`, proposed answer, confidence, and source;
-- `DRAFTING`, `WAITING GREEN`, and `SUBMITTED` execution state;
+- `WAITING DISCORD`, `MANUAL`, `DRAFTING`, `WAITING GREEN`, and `SUBMITTED` execution state;
 - reveal learning, errors, and session counters.
 
 `runtime/operator_status.json` is the atomic machine-readable snapshot. It receives a one-second heartbeat; if the worker stops updating unexpectedly, the panel changes to `STALE`. On a normal F12/Ctrl+C stop it shows `STOPPED` and closes after four seconds. Configure placement, opacity, polling, topmost, and click-through behavior in the `status` section of `config.json`.

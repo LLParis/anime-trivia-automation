@@ -127,6 +127,7 @@
     "draft_while_locked": true,
     "verify_composer": true,
     "auto_focus_composer": true,
+    "foreground_wait_timeout_seconds": 55.0,
     "composer_name_prefix": "Message #💜anime-chat",
     "composer_class_fragment": "slateTextArea",
     "respect_detected_countdown": true,
