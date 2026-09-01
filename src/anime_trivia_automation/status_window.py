@@ -17,6 +17,8 @@ PHASE_COLORS = {
     "RED": "#ed4245",
     "KNOWN": "#57f287",
     "UNKNOWN": "#f0b232",
+    "RESOLVING": "#5b8def",
+    "NOVEL": "#57f287",
     "DRAFTING": "#8f73ff",
     "WAITING_GREEN": "#fee75c",
     "GREEN": "#2ecc70",

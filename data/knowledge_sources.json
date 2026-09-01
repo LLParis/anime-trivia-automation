@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "captured_utc": "2026-09-01T14:55:00Z",
+  "distribution_policy": "Private local index only. Do not redistribute the combined sources or derived database without reviewing each upstream license and AniList terms.",
+  "sources": [
+    {
+      "id": "anilist-current",
+      "role": "anime and character descriptions, aliases, roles, tags, and relations",
+      "url": "https://www.kaggle.com/datasets/calebmwelsh/anilist-anime-dataset",
+      "version": 94,
+      "updated": "2026-08-30",
+      "local_file": "data/external/anilist/anilist_anime_data_complete.csv",
+      "bytes": 438222688,
+      "sha256": "ca852bdacc04889321b1d8e831c6de4edf81afd4156e5baa21fd7e8ffc733c99",
+      "declared_license": "CC0 on Kaggle",
+      "license_note": "Uploader claim may not override AniList upstream terms; private local use only."
+    },
+    {
+      "id": "animequotes-english",
+      "role": "exact English quote to anime and character mapping",
+      "url": "https://huggingface.co/datasets/ewgsta/animequotes",
+      "updated": "2026-05-09",
+      "local_file": "data/external/animequotes/quotes.csv",
+      "bytes": 1504714,
+      "sha256": "c6eaf6216f9fba4346f660cfa8292bc94d26c702eb43738b763d4b439cf9d483",
+      "declared_license": "MIT"
+    },
+    {
+      "id": "manami-cross-provider",
+      "role": "canonical titles, synonyms, tags, provider IDs, and related works",
+      "url": "https://github.com/manami-project/anime-offline-database/releases/tag/2026-27",
+      "version": "2026-27",
+      "updated": "2026-07-04",
+      "local_file": "data/external/manami/anime-offline-database.jsonl",
+      "bytes": 62331124,
+      "sha256": "8a63189782176fe19e00eca275288ba855ce54d6cb4d7ae97ec71450f861b1aa",
+      "declared_license": "ODbL 1.0 and DbCL 1.0"
+    }
+  ]
+}

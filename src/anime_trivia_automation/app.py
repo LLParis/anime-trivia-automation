@@ -17,6 +17,7 @@ from .capture import DXCapture, GpuFrameChangeGate
 from .config import AppConfig
 from .discord import DiscordQuestionLocator
 from .models import AnswerTask, CacheHit, PromptObservation, Scene
+from .novel import NovelAnswerResolver
 from .ocr import PaddleOCREngine, PromptExtractor
 from .status import NullStatus, OperatorStatus
 from .typing import (
@@ -82,6 +83,7 @@ class AnimeTriviaAutomation:
         self._active_status_token: str | None = None
         self._active_status_closed = False
         self._status_resolution: dict[str, str] = {}
+        self._novel_attempted: set[tuple[str, str]] = set()
 
         capture_width = config.capture.region[2] - config.capture.region[0]
         capture_height = config.capture.region[3] - config.capture.region[1]
@@ -109,10 +111,12 @@ class AnimeTriviaAutomation:
             history_entries=self._cache.history_count,
         )
         self._pending_round: PendingRound | None = None
-        self._ephemeral_answer: tuple[str, str, str] | None = None
+        self._ephemeral_answer: tuple[str, str, str, str] | None = None
         self._quiz_ended = False
+        self._awaiting_quiz_start = True
         self._accessible_round: tuple[str, str] | None = None
         self._vlm = LazyQwenResolver(config.vlm)
+        self._novel = NovelAnswerResolver(config.novel)
         self._foreground_guard = ForegroundWindowGuard(config.typing)
         self._question_locator = DiscordQuestionLocator()
 
@@ -225,6 +229,20 @@ class AnimeTriviaAutomation:
             return self._accessible_round[1]
         return observation.hint_text or "Visual / emoji clue"
 
+    def _clue_fingerprint(self, observation: PromptObservation) -> str:
+        if (
+            self._accessible_round is not None
+            and self._accessible_round[0] == observation.signature
+        ):
+            return "semantic:" + normalize_accessible_clue(
+                self._accessible_round[1]
+            )
+        if observation.prompt_kind == "visual" and observation.perceptual_hash:
+            return f"visual:{observation.perceptual_hash}"
+        return "text:" + normalize_accessible_clue(
+            observation.hint_text or "Visual / emoji clue"
+        )
+
     def _on_visual_change(self, generation: int) -> None:
         # Pause any in-progress input immediately. OCR will either revalidate
         # the same logical round (for a harmless status edit) or replace it.
@@ -319,16 +337,24 @@ class AnimeTriviaAutomation:
             )
             return
 
-        if not self._dispatcher.observe_prompt(
-            observation.signature,
-            observation.readiness,
-            scene.generation,
-        ):
-            LOGGER.debug(
-                "Discarded stale OCR observation for scene %d", scene.generation
-            )
-            return
+        if self._awaiting_quiz_start and observation.readiness in {"locked", "ready"}:
+            if not self._is_new_quiz_start(
+                observation.question_label, observation.readiness
+            ):
+                LOGGER.info(
+                    "Ignored live-looking card while awaiting a new locked Q1: %s %s",
+                    observation.question_label,
+                    observation.readiness,
+                )
+                return
+            LOGGER.info("First locked card observed; starting a new quiz session")
+            self._awaiting_quiz_start = False
+            self._quiz_ended = False
         self._save_prompt_crop(observation)
+        # A round signature is intentionally stable across OCR edits, so a UIA
+        # clue cached under that signature must never survive into this fresh
+        # stable observation. Re-read Discord semantics before every lookup.
+        self._accessible_round = None
         LOGGER.info(
             "Prompt %s kind=%s type=%s readiness=%s (red=%d green=%d) hint=%r "
             "OCR=%.1fms extract/hash=%.1fms",
@@ -374,6 +400,13 @@ class AnimeTriviaAutomation:
         if observation.readiness == "closed":
             if self._quiz_ended:
                 return
+            if not self._dispatcher.observe_prompt(
+                observation.signature,
+                "closed",
+                scene.generation,
+                self._clue_fingerprint(observation),
+            ):
+                return
             active_round_closed = self._active_status_token == round_token
             if active_round_closed:
                 self._status.emit(
@@ -398,9 +431,6 @@ class AnimeTriviaAutomation:
             return
         if observation.readiness not in {"locked", "ready"}:
             return
-        if self._quiz_ended:
-            LOGGER.info("Fresh live card observed; starting a new quiz session")
-            self._quiz_ended = False
         if (
             self._pending_round is not None
             and self._pending_round.signature != observation.signature
@@ -410,12 +440,6 @@ class AnimeTriviaAutomation:
                 self._pending_round.question_label,
             )
             self._pending_round = None
-        if (
-            self._ephemeral_answer is not None
-            and self._ephemeral_answer[0] != observation.signature
-        ):
-            self._ephemeral_answer = None
-
         lookup_start = time.perf_counter()
         hit = self._match_authoritative_history(observation)
         if hit is None and observation.prompt_kind == "text":
@@ -426,6 +450,21 @@ class AnimeTriviaAutomation:
         elif hit is None:
             hit = self._cache.match_image(observation.perceptual_hash or "")
         lookup_ms = (time.perf_counter() - lookup_start) * 1000.0
+        live_clue = self._display_clue(observation)
+        clue_fingerprint = self._clue_fingerprint(observation)
+        if not self._dispatcher.observe_prompt(
+            observation.signature,
+            observation.readiness,
+            scene.generation,
+            clue_fingerprint,
+        ):
+            return
+        if self._ephemeral_answer is not None and (
+            self._ephemeral_answer[0] != observation.signature
+            or self._ephemeral_answer[1] != clue_fingerprint
+        ):
+            LOGGER.info("Discarded a candidate after the round clue changed")
+            self._ephemeral_answer = None
 
         answer: str | None
         source: str
@@ -457,12 +496,45 @@ class AnimeTriviaAutomation:
         elif (
             self._ephemeral_answer is not None
             and self._ephemeral_answer[0] == observation.signature
+            and self._ephemeral_answer[1] == clue_fingerprint
         ):
-            _signature, answer, source = self._ephemeral_answer
+            _signature, _fingerprint, answer, source = self._ephemeral_answer
             LOGGER.info("Reusing verified in-memory round answer -> %s", answer)
         else:
             self._arm_pending_round(observation, scene)
-            if (
+            novel_clue = live_clue
+            if self._config.novel.enabled and novel_clue not in {
+                "Visual / emoji clue",
+                "<visual/emoji>",
+            }:
+                attempt_key = (
+                    round_token,
+                    normalize_accessible_clue(novel_clue),
+                )
+                source = "qwen38-retrieval-consensus"
+                if attempt_key in self._novel_attempted:
+                    answer = None
+                    LOGGER.debug("Novel resolver already attempted this exact round clue")
+                else:
+                    self._novel_attempted.add(attempt_key)
+                    self._status.emit(
+                        "RESOLVING",
+                        title=f"Researching — {observation.question_label or 'Question'}",
+                        detail="Grounding the new clue with live retrieval and local Qwen3.8",
+                        question=observation.question_label or "Question",
+                        clue=novel_clue,
+                        answer="—",
+                        source="local Qwen3.8 + retrieval",
+                        readiness=observation.readiness,
+                        event_id=round_token,
+                    )
+                    vlm_start = time.perf_counter()
+                    answer = self._novel.resolve(
+                        novel_clue,
+                        observation.expected_answer_type,
+                    )
+                    vlm_ms = (time.perf_counter() - vlm_start) * 1000.0
+            elif (
                 not self._config.vlm.allow_unverified_submission
                 or (
                     observation.prompt_kind == "visual"
@@ -485,9 +557,31 @@ class AnimeTriviaAutomation:
                 # Anime Soul reveal verifies it.
                 self._ephemeral_answer = (
                     observation.signature,
+                    clue_fingerprint,
                     answer,
                     source,
                 )
+                if source == "qwen38-retrieval-consensus":
+                    previous_resolution = self._status_resolution.get(round_token)
+                    self._status_resolution[round_token] = "known"
+                    self._status.emit(
+                        "NOVEL",
+                        title=f"New answer — {observation.question_label or 'Question'}",
+                        detail=(
+                            f"Retrieval-grounded local consensus "
+                            f"({self._novel.last_confidence:.0%}, {vlm_ms:.0f} ms)"
+                        ),
+                        question=observation.question_label or "Question",
+                        clue=novel_clue,
+                        answer=answer,
+                        source=source,
+                        readiness=observation.readiness,
+                        event_id=round_token,
+                        increment="known" if previous_resolution != "known" else None,
+                        decrement=(
+                            "unknown" if previous_resolution == "unknown" else None
+                        ),
+                    )
 
         if answer is None:
             LOGGER.warning(
@@ -513,7 +607,10 @@ class AnimeTriviaAutomation:
         # works.  Accept the answer only if OCR has re-confirmed the same live
         # logical card; never rely on exact frame-generation equality.
         if not self._active_prompt.wait_current_open(
-            observation.signature, self._stop_event, timeout=1.0
+            observation.signature,
+            self._stop_event,
+            timeout=1.0,
+            clue_fingerprint=clue_fingerprint,
         ):
             LOGGER.info("Resolved answer belongs to a stale or closed prompt")
             return
@@ -523,6 +620,7 @@ class AnimeTriviaAutomation:
             "extract_hash": extract_ms,
             "lookup": lookup_ms,
             "vlm": vlm_ms,
+            "novel": vlm_ms if source == "qwen38-retrieval-consensus" else 0.0,
         }
         task = AnswerTask(
             answer=answer,
@@ -534,6 +632,7 @@ class AnimeTriviaAutomation:
             source=source,
             stage_timings_ms=timings,
             round_token=round_token,
+            clue_fingerprint=clue_fingerprint,
         )
         if self._dispatcher.submit(task):
             LOGGER.info(
@@ -547,6 +646,7 @@ class AnimeTriviaAutomation:
         if self._quiz_ended:
             return
         self._quiz_ended = True
+        self._awaiting_quiz_start = True
         self._pending_round = None
         self._ephemeral_answer = None
         self._accessible_round = None
@@ -579,6 +679,23 @@ class AnimeTriviaAutomation:
         match = re.search(r"\b(\d+)\s*/\s*(\d+)\b", question_label)
         return bool(match and int(match.group(1)) == int(match.group(2)))
 
+    @staticmethod
+    def _is_first_question(question_label: str | None) -> bool:
+        if not question_label:
+            return False
+        match = re.search(r"\b(\d+)\s*/\s*(\d+)\b", question_label)
+        return bool(match and int(match.group(1)) == 1)
+
+    @classmethod
+    def _is_new_quiz_start(cls, question_label: str | None, readiness: str) -> bool:
+        return readiness == "locked" and cls._is_first_question(question_label)
+
+    @staticmethod
+    def _effective_prompt_kind(prompt_kind: str, clue: str) -> str:
+        if clue and sum(character.isalpha() for character in clue) >= 3:
+            return "text"
+        return prompt_kind
+
     def _should_finish_without_card(self, quiz_complete: bool) -> bool:
         """Accept a viewport marker only after our tracked final round closed."""
 
@@ -591,16 +708,6 @@ class AnimeTriviaAutomation:
     def _match_authoritative_history(
         self, observation: PromptObservation
     ) -> CacheHit | None:
-        if (
-            self._accessible_round is not None
-            and self._accessible_round[0] == observation.signature
-        ):
-            clue = self._accessible_round[1]
-            return self._cache.match_history(
-                clue,
-                observation.expected_answer_type,
-            )
-
         allowed, _reason = self._foreground_guard.allowed()
         window = self._foreground_guard.current() if allowed else None
         if window is None:
@@ -681,17 +788,22 @@ class AnimeTriviaAutomation:
         if (
             self._pending_round is None
             or self._pending_round.signature != observation.signature
+            or normalize_accessible_clue(self._pending_round.clue)
+            != normalize_accessible_clue(clue)
         ):
             full_spans = self._ocr.recognize(full_scene.frame)
             baseline = Counter(
                 normalized
                 for normalized, _answer, _top, _left in self._reveal_records(full_spans)
             )
+            effective_prompt_kind = self._effective_prompt_kind(
+                observation.prompt_kind, clue
+            )
             self._pending_round = PendingRound(
                 signature=observation.signature,
                 question_label=observation.question_label,
                 expected_answer_type=observation.expected_answer_type,
-                prompt_kind=observation.prompt_kind,
+                prompt_kind=effective_prompt_kind,
                 clue=clue,
                 hashes=(
                     {observation.perceptual_hash}
@@ -875,6 +987,18 @@ class AnimeTriviaAutomation:
                 "Loading the explicitly enabled experimental VLM before capture"
             )
             self._vlm.ensure_loaded()
+        if self._config.novel.enabled:
+            self._status.emit(
+                "LOADING",
+                title="Loading Qwen3.8 anime solver",
+                detail="Starting the retrieval-grounded local model before capture",
+                readiness="unknown",
+            )
+            if not self._novel.ensure_ready():
+                raise RuntimeError(
+                    "Qwen3.8 novel solver failed startup preflight: "
+                    f"{self._novel.last_detail}"
+                )
 
         self._dispatcher.start()
         self._processor_thread.start()
@@ -916,6 +1040,7 @@ class AnimeTriviaAutomation:
             event_id="stopping",
         )
         self._capture.request_stop()
+        self._novel.close()
         try:
             self._emergency_stop.stop()
         except RuntimeError:

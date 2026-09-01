@@ -17,7 +17,7 @@ if not exist "config.json" (
   exit /b 1
 )
 
-echo Loading local OCR and verified trivia history. Capture starts only after READY.
+echo Loading local OCR, verified history, and Qwen3.8. Capture starts only after READY.
 echo The top-right status panel shows every live decision and never accepts input.
 echo Keep Anime Soul #anime-chat foregrounded and press F12 to stop.
 echo.

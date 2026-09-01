@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "source": "All four available days of Anime Soul question cards paired chronologically with dated bot reveals; the 3-question mini-round was verified by exact answer searches",
-  "captured_utc": "2026-09-01T02:30:00Z",
+  "source": "All five available days of Anime Soul question cards paired chronologically with dated bot reveals; the 3-question mini-round and September 1 gaps were verified by exact bot-answer searches",
+  "captured_utc": "2026-09-01T15:20:00Z",
   "pairs": [
     {"clue": "\"Sometimes living can be hard, but it's only because we're alive that we can make each other laugh, cry, and be happy.\"", "type": "anime_title", "answer": "Fruits Basket"},
     {"clue": "🏍️ 💊 🏙️ 💥", "type": "anime_title", "answer": "Akira"},
@@ -122,6 +122,16 @@
     {"clue": "🧱 🪽 ⚔️ 👹", "type": "anime_title", "answer": "Attack on Titan"},
     {"clue": "🎨 🟦 🖼️ 🏫", "type": "anime_title", "answer": "Blue Period"},
     {"clue": "\"The world is filled with life unknown to man.\"", "type": "anime_title", "answer": "Mushishi"},
-    {"clue": "A pale, charismatic man whose calm smile hides the unsettling influence he has over nearly everyone he meets.", "type": "character", "answer": "Johan Liebert"}
+    {"clue": "A pale, charismatic man whose calm smile hides the unsettling influence he has over nearly everyone he meets.", "type": "character", "answer": "Johan Liebert"},
+    {"clue": "A handsome student possessed by the spirit of the Rat and burdened by an emotionally distant upbringing.", "type": "character", "answer": "Yuki Sohma"},
+    {"clue": "\"It's over nine thousand!\"", "type": "anime_title", "answer": "Dragon Ball Z"},
+    {"clue": "A newly appointed inspector with short brown hair who tries to uphold justice within a system that measures people's mental states.", "type": "character", "answer": "Akane Tsunemori"},
+    {"clue": "🥽 🦖 💻 🌐", "type": "anime_title", "answer": "Digimon Adventure"},
+    {"clue": "🚗 ⛰️ 🥤 💨", "type": "anime_title", "answer": "Initial D"},
+    {"clue": "\"Sit, boy!\"", "type": "anime_title", "answer": "Inuyasha"},
+    {"clue": "A young woman who recruits two wandering swordsmen to help her search for a samurai who smells of sunflowers.", "type": "character", "answer": "Fuu Kasumi"},
+    {"clue": "🏍️ ❄️ 🏚️ 🥫", "type": "anime_title", "answer": "Girls' Last Tour"},
+    {"clue": "\"Dedicate your hearts!\"", "type": "anime_title", "answer": "Attack on Titan"},
+    {"clue": "A white-haired orphan who transforms into a tiger under moonlight and joins a supernatural detective agency.", "type": "character", "answer": "Atsushi Nakajima"}
   ]
 }

@@ -82,3 +82,4 @@ class AnswerTask:
     source: str
     stage_timings_ms: dict[str, float] = field(default_factory=dict)
     round_token: str | None = None
+    clue_fingerprint: str = ""

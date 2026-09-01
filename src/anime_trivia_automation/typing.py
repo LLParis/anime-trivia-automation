@@ -126,19 +126,26 @@ class ActivePromptState:
         self._uncertain = False
         self._readiness = "unknown"
         self._generation = 0
+        self._clue_fingerprint = ""
 
     def update(
         self,
         signature: str | None,
         readiness: str = "unknown",
         generation: int | None = None,
+        clue_fingerprint: str | None = None,
     ) -> bool:
         with self._condition:
             next_generation = self._generation if generation is None else generation
             if next_generation < self._generation:
                 return False
+            previous_signature = self._signature
             self._generation = next_generation
             self._signature = signature
+            if clue_fingerprint is not None:
+                self._clue_fingerprint = clue_fingerprint
+            elif signature != previous_signature:
+                self._clue_fingerprint = ""
             self._uncertain = False
             self._readiness = readiness if signature is not None else "unknown"
             self._condition.notify_all()
@@ -154,20 +161,26 @@ class ActivePromptState:
                 self._uncertain = True
             self._condition.notify_all()
 
-    def is_current(self, signature: str) -> bool:
+    def is_current(self, signature: str, clue_fingerprint: str = "") -> bool:
         with self._condition:
-            return self._signature == signature and not self._uncertain
+            return (
+                self._signature == signature
+                and (not clue_fingerprint or self._clue_fingerprint == clue_fingerprint)
+                and not self._uncertain
+            )
 
     def wait_current(
         self,
         signature: str,
         stop_event: threading.Event,
         timeout: float = 2.0,
+        clue_fingerprint: str = "",
     ) -> bool:
         deadline = time.monotonic() + timeout
         with self._condition:
             while (
                 self._signature == signature
+                and (not clue_fingerprint or self._clue_fingerprint == clue_fingerprint)
                 and self._uncertain
                 and not stop_event.is_set()
             ):
@@ -178,6 +191,7 @@ class ActivePromptState:
             return (
                 not stop_event.is_set()
                 and self._signature == signature
+                and (not clue_fingerprint or self._clue_fingerprint == clue_fingerprint)
                 and not self._uncertain
             )
 
@@ -186,11 +200,13 @@ class ActivePromptState:
         signature: str,
         stop_event: threading.Event,
         timeout: float,
+        clue_fingerprint: str = "",
     ) -> bool:
         deadline = time.monotonic() + timeout
         with self._condition:
             while (
                 self._signature == signature
+                and (not clue_fingerprint or self._clue_fingerprint == clue_fingerprint)
                 and (self._uncertain or self._readiness != "ready")
                 and self._readiness != "closed"
                 and not stop_event.is_set()
@@ -202,6 +218,7 @@ class ActivePromptState:
             return (
                 not stop_event.is_set()
                 and self._signature == signature
+                and (not clue_fingerprint or self._clue_fingerprint == clue_fingerprint)
                 and not self._uncertain
                 and self._readiness == "ready"
             )
@@ -211,12 +228,14 @@ class ActivePromptState:
         signature: str,
         stop_event: threading.Event,
         timeout: float = 2.0,
+        clue_fingerprint: str = "",
     ) -> bool:
         """Wait through an in-flight frame, but fail closed on observed non-ready."""
         deadline = time.monotonic() + timeout
         with self._condition:
             while (
                 self._signature == signature
+                and (not clue_fingerprint or self._clue_fingerprint == clue_fingerprint)
                 and self._uncertain
                 and not stop_event.is_set()
             ):
@@ -227,6 +246,7 @@ class ActivePromptState:
             return (
                 not stop_event.is_set()
                 and self._signature == signature
+                and (not clue_fingerprint or self._clue_fingerprint == clue_fingerprint)
                 and not self._uncertain
                 and self._readiness == "ready"
             )
@@ -236,6 +256,7 @@ class ActivePromptState:
         signature: str,
         stop_event: threading.Event,
         timeout: float = 2.0,
+        clue_fingerprint: str = "",
     ) -> bool:
         """Wait through OCR uncertainty and accept only a live red/green card."""
 
@@ -243,6 +264,7 @@ class ActivePromptState:
         with self._condition:
             while (
                 self._signature == signature
+                and (not clue_fingerprint or self._clue_fingerprint == clue_fingerprint)
                 and self._uncertain
                 and not stop_event.is_set()
             ):
@@ -253,14 +275,16 @@ class ActivePromptState:
             return (
                 not stop_event.is_set()
                 and self._signature == signature
+                and (not clue_fingerprint or self._clue_fingerprint == clue_fingerprint)
                 and not self._uncertain
                 and self._readiness in {"locked", "ready"}
             )
 
-    def is_open(self, signature: str) -> bool:
+    def is_open(self, signature: str, clue_fingerprint: str = "") -> bool:
         with self._condition:
             return (
                 self._signature == signature
+                and (not clue_fingerprint or self._clue_fingerprint == clue_fingerprint)
                 and not self._uncertain
                 and self._readiness in {"locked", "ready"}
             )
@@ -270,6 +294,7 @@ class ActivePromptState:
         signature: str,
         stop_event: threading.Event,
         callback: Callable[[], bool],
+        clue_fingerprint: str = "",
     ) -> bool:
         """Hold the prompt-state lock across the last check and Enter dispatch."""
 
@@ -277,6 +302,10 @@ class ActivePromptState:
             if (
                 stop_event.is_set()
                 or self._signature != signature
+                or (
+                    clue_fingerprint
+                    and self._clue_fingerprint != clue_fingerprint
+                )
                 or self._uncertain
                 or self._readiness != "ready"
             ):
@@ -441,10 +470,17 @@ class SafeKeyboardExecutor:
         if not self._clear_owned_draft(composer, expected_prefix):
             self._remember_orphan(expected_prefix)
 
-    def _still_open(self, signature: str, *, check_window: bool = True) -> bool:
+    def _still_open(
+        self,
+        signature: str,
+        clue_fingerprint: str = "",
+        *,
+        check_window: bool = True,
+    ) -> bool:
         state_valid = self._active_prompt.wait_current_open(
             signature,
             self._stop_event,
+            clue_fingerprint=clue_fingerprint,
         )
         if not state_valid:
             return False
@@ -455,15 +491,21 @@ class SafeKeyboardExecutor:
                 return False
         return True
 
-    def _wait_until_open(self, deadline: float, signature: str) -> bool:
+    def _wait_until_open(
+        self, deadline: float, signature: str, clue_fingerprint: str = ""
+    ) -> bool:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return self._still_open(signature, check_window=False)
+                return self._still_open(
+                    signature, clue_fingerprint, check_window=False
+                )
             if self._stop_event.wait(min(remaining, 0.05)):
                 return False
             if not self._active_prompt.wait_current_open(
-                signature, self._stop_event
+                signature,
+                self._stop_event,
+                clue_fingerprint=clue_fingerprint,
             ):
                 return False
 
@@ -509,6 +551,7 @@ class SafeKeyboardExecutor:
                 task.prompt_signature,
                 self._stop_event,
                 self._readiness_config.ready_wait_timeout_seconds,
+                clue_fingerprint=task.clue_fingerprint,
             ):
                 LOGGER.warning("Green-outline gate timed out or the round changed")
                 return False
@@ -549,14 +592,20 @@ class SafeKeyboardExecutor:
             pre_delay,
             sum(delays),
         )
-        if not self._wait_until_open(start_at, task.prompt_signature):
+        if not self._wait_until_open(
+            start_at, task.prompt_signature, task.clue_fingerprint
+        ):
             LOGGER.info("Draft canceled before typing because the prompt changed")
             return False
 
         typed_characters = 0
 
         def should_continue() -> bool:
-            if not self._still_open(task.prompt_signature, check_window=True):
+            if not self._still_open(
+                task.prompt_signature,
+                task.clue_fingerprint,
+                check_window=True,
+            ):
                 return False
             if composer is None:
                 return True
@@ -651,6 +700,7 @@ class SafeKeyboardExecutor:
                 task.prompt_signature,
                 self._stop_event,
                 self._readiness_config.ready_wait_timeout_seconds,
+                clue_fingerprint=task.clue_fingerprint,
             ):
                 LOGGER.warning("Green-outline gate timed out or the round changed")
                 self._clear_or_remember(composer, answer)
@@ -704,6 +754,7 @@ class SafeKeyboardExecutor:
                 task.prompt_signature,
                 self._stop_event,
                 dispatch_enter_if_owned,
+                clue_fingerprint=task.clue_fingerprint,
             )
         else:
             dispatched = dispatch_enter_if_owned()
@@ -806,8 +857,11 @@ class AnswerDispatcher:
         signature: str | None,
         readiness: str = "unknown",
         generation: int | None = None,
+        clue_fingerprint: str | None = None,
     ) -> bool:
-        if not self._active_prompt.update(signature, readiness, generation):
+        if not self._active_prompt.update(
+            signature, readiness, generation, clue_fingerprint
+        ):
             return False
         with self._lock:
             # A single transient OCR miss (None) must cancel pending typing but
@@ -822,7 +876,9 @@ class AnswerDispatcher:
         return True
 
     def submit(self, task: AnswerTask) -> bool:
-        if not self._active_prompt.is_open(task.prompt_signature):
+        if not self._active_prompt.is_open(
+            task.prompt_signature, task.clue_fingerprint
+        ):
             LOGGER.debug("Rejected answer task for a non-live prompt")
             return False
         with self._lock:

@@ -147,6 +147,56 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertTrue(AnimeTriviaAutomation._is_final_question("Question 10/10"))
         self.assertTrue(AnimeTriviaAutomation._is_final_question("3/3"))
 
+    def test_new_session_requires_a_locked_first_question(self) -> None:
+        self.assertTrue(AnimeTriviaAutomation._is_new_quiz_start("1/10", "locked"))
+        self.assertFalse(AnimeTriviaAutomation._is_new_quiz_start("1/10", "ready"))
+        self.assertFalse(AnimeTriviaAutomation._is_new_quiz_start("5/10", "locked"))
+
+    def test_short_quote_is_treated_as_text_for_reveal_learning(self) -> None:
+        self.assertEqual(
+            AnimeTriviaAutomation._effective_prompt_kind("visual", '"Sit, boy!"'),
+            "text",
+        )
+        self.assertEqual(
+            AnimeTriviaAutomation._effective_prompt_kind("visual", "🏍️ ❄️ 🏚️ 🥫"),
+            "visual",
+        )
+
+    def test_clue_change_blocks_a_stale_same_round_enter(self) -> None:
+        active = ActivePromptState()
+        signature = "round:character:1/10"
+        active.update(signature, "locked", 1, "first-clue")
+        active.update(signature, "ready", 2, "corrected-clue")
+        called = False
+
+        def dispatch() -> bool:
+            nonlocal called
+            called = True
+            return True
+
+        self.assertFalse(
+            active.execute_if_ready(
+                signature,
+                threading.Event(),
+                dispatch,
+                clue_fingerprint="first-clue",
+            )
+        )
+        self.assertFalse(called)
+
+    def test_visual_fingerprint_uses_hash_without_semantic_emoji(self) -> None:
+        app = AnimeTriviaAutomation.__new__(AnimeTriviaAutomation)
+        app._accessible_round = None
+        observation = SimpleNamespace(
+            signature="round:anime_title:4/10",
+            prompt_kind="visual",
+            perceptual_hash="abc123",
+            hint_text="Visual / emoji clue",
+        )
+        self.assertEqual(app._clue_fingerprint(observation), "visual:abc123")
+        app._accessible_round = (observation.signature, "🥽 🦖 💻 🌐")
+        self.assertTrue(app._clue_fingerprint(observation).startswith("semantic:"))
+
     def test_status_round_identity_survives_footer_ocr_variation(self) -> None:
         app = AnimeTriviaAutomation.__new__(AnimeTriviaAutomation)
         app._status_session_id = 1

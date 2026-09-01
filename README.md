@@ -1,30 +1,34 @@
 # Anime Trivia Automation
 
-Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, resolves only from verified local data, drafts the answer while the card is red, and presses Enter only after the same card turns green.
+Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, uses verified local history first and retrieval-grounded local Qwen3.8 for genuinely new clues, drafts during red, and presses Enter only after the same card turns green.
 
-Version 0.6.0 is the visible-operator release built on the post-live-incident repair. The first 6 PM run proved that capture, OCR, and red/green recognition worked, but a single unverified model guess was not a safe answer source. Model-generated submissions are now disabled by default. The primary resolver is a local, server-verified history containing 120 exact clue→answer pairs (including Unicode emoji clues), plus the text and pHash caches.
+Version 0.7.0 adds the missing novel-question product path after the September 1 run correctly detected all ten cards but deliberately answered none. The resolver now starts the installed Qwen3.8-27B Q6 model itself, plans multiple evidence searches, retrieves local AniList/quote/alias evidence plus Wikipedia and web results, synthesizes the requested character name or anime title, and runs a conservative evidence verifier before drafting. All ten September 1 bot reveals expand exact history to 130 clues; model answers remain round-local until the bot reveal verifies them.
 
 ```text
 DXcam 60 FPS physical-pixel crop
   -> CUDA change/stability gate
   -> PaddleOCR GPU + newest-card/readiness extraction
   -> Discord UI Automation semantic clue read
-       -> authoritative 120-pair history (exact text + exact emoji)
+       -> authoritative 130-pair history (exact text + exact emoji)
        -> fuzzy text cache / strict pHash cache
-       -> unknown: no submission; wait for the bot's paired reveal
+       -> unseen clue: parallel retrieval + hot Qwen3.8 synthesis + verifier
+       -> unresolved/low-confidence: no submission; wait for paired reveal
   -> claim one empty #💜anime-chat composer through UI Automation
   -> humanized draft while red
   -> verify exact macro-owned draft before every character and Enter
   -> press Enter only when the same card has the green outline
 ```
 
-## What changed after the failed live run
+## What changed after the failed live runs
 
 - Removed all Qwen-generated and incorrectly associated reveal entries from the mutable cache.
 - Corrected the complete 6 PM round from the bot's own reveal messages.
 - Mined all 120 cards from the four available days, including a 3-question mini-round, and paired them conflict-free with Anime Soul's bot reveals without using a Discord token or API.
 - Added semantic accessibility lookup, which reads the actual Unicode emoji sequence instead of asking OCR or a vision model to identify it.
-- Disabled unverified model submissions. Qwen3-VL-32B, Qwen3.8-27B Q6, and Gemma 4 31B were tested against the exact failed round and were not accurate enough to authorize live answers.
+- Replaced raw model guessing with retrieval-grounded Qwen3.8. Raw Qwen confidently missed several September 1 character clues; evidence retrieval plus verification resolved the five novel clues not promoted into history as Yuki Sohma, Dragon Ball Z, Akane Tsunemori, Initial D, and InuYasha in 3.4–3.7 seconds each.
+- The app owns a loopback-only llama.cpp Q6 server, warms it before capture, and stops only that owned process on F12/Ctrl+C. Q4 KV cache keeps combined OCR/model desktop usage near 27.2 GiB on the 32 GiB RTX 5090.
+- Added a locked-Q1 session-start latch so historical green cards cannot reactivate a completed or newly launched worker.
+- Treats short accessible quotes such as “Sit, boy!” as text for reveal learning even when OCR geometry labels their crop visual.
 - Replaced “Discord is foreground” with exact composer ownership: the only accepted editor is `Message #💜anime-chat`, it must be empty, and its content must equal the macro-owned prefix before each key.
 - Drafts are typed during the five-second red reading window. Enter remains blocked until green, preserving the timing rule without losing long answers to the observed 0.8–2.0 second winners.
 - Closed cards return before lookup or submission. Post-quiz scrolling is inert.
@@ -39,12 +43,16 @@ DXcam 60 FPS physical-pixel crop
 - `src/anime_trivia_automation/typing.py` — draft-before-green state machine, composer ownership, human-interference detection, and F12 stop.
 - `src/anime_trivia_automation/status.py` — structured low-frequency operator events, counters, heartbeat, and atomic status persistence.
 - `src/anime_trivia_automation/status_window.py` — passive top-right status panel using Windows no-activate/click-through styles.
+- `src/anime_trivia_automation/novel.py` — managed llama.cpp lifecycle, diverse retrieval, Qwen3.8 synthesis, verification, canonicalization, and per-session caching.
+- `src/anime_trivia_automation/knowledge.py` — read-only exact-quote and FTS5 access to the local source-attributed anime index.
 - `src/anime_trivia_automation/vlm.py` — experimental local-model resolver; live submission is disabled in config.
-- `data/trivia_history.seed.json` — 120 server-verified clue→answer pairs.
-- `data/answer_catalog.seed.json` — 207 unique server-observed canonical answer strings for future constrained retrieval work.
+- `data/trivia_history.seed.json` — 130 server-verified clue→answer pairs.
+- `data/answer_catalog.seed.json` — 215 server-observed canonical answer strings used for spelling canonicalization.
 - `data/trivia_cache.seed.json` — reviewed text/pHash starter cache.
 - `data/trivia_cache.json` — ignored mutable cache, repaired from the reviewed seed on launch.
 - `scripts/replay_screenshots.py` — one-warmup offline replay of saved cards.
+- `scripts/build_anime_knowledge.py` — streamed, atomic index build from the private local AniList, quote, and Manami source files.
+- `docs/KNOWLEDGE_SOURCE_AUDIT.md` — detailed schema, size, freshness, license, and inclusion audit for all investigated datasets.
 
 ## Install
 
@@ -58,7 +66,7 @@ Copy-Item .\config.example.json .\config.json
 
 The installed workstation config is already calibrated and should not be overwritten unless recalibrating. The Windows installer creates `.venv`, installs the checkout in editable mode, and uses the shared CUDA PyTorch runtime for PaddleOCR and the frame gate.
 
-The live default does **not** load a large language model. Optional model files may still be disk-warmed for experimentation, but `vlm.enabled` and `vlm.allow_unverified_submission` remain `false` for live use.
+The installed workstation config enables the `novel` lane and points at its verified Qwen3.8-27B Q6 GGUF plus pinned llama.cpp CUDA runtime. The portable example leaves it disabled until those two paths are configured. The older in-process `vlm` lane remains disabled.
 
 ## Calibrate the capture region
 
@@ -116,7 +124,7 @@ The panel reports:
 
 - `LOADING` and `ARMED` startup state;
 - question number, clue, and red/green/closed readiness;
-- `KNOWN` versus `UNKNOWN`, proposed answer, and exact source;
+- `KNOWN`, `RESOLVING`, `NOVEL`, or `UNKNOWN`, proposed answer, confidence, and source;
 - `DRAFTING`, `WAITING GREEN`, and `SUBMITTED` execution state;
 - reveal learning, errors, and session counters.
 
@@ -129,9 +137,10 @@ Resolution order is:
 1. exact semantic history match (including emoji/ZWJ sequences);
 2. fuzzy verified-history/text match with threshold and runner-up margin;
 3. strict pHash match with Hamming-distance and ambiguity margins;
-4. otherwise abstain.
+4. retrieval-grounded Qwen3.8 synthesis plus an independent type/evidence verifier;
+5. otherwise abstain.
 
-No model guess is written to the cache. An unknown clue can be learned only after the same live round has progressed red/green→closed and the bot posts one newly observed, spatially associated `Correct!` or `Time's up! ... the answer was ...` result. Text and semantic clues are persisted atomically; visual hashes are stored only from locked/ready frames.
+No novel model answer is written directly to the durable cache. It can serve only its current live round. A clue becomes durable only after the same round has progressed red/green→closed and the bot posts one newly observed, spatially associated `Correct!` or `Time's up! ... the answer was ...` result. Text and semantic clues are persisted atomically; visual hashes are stored only from locked/ready frames.
 
 The mutable cache schema remains JSON and now also supports semantic clues:
 
@@ -157,8 +166,9 @@ Writes use a same-directory temporary file, flush and `fsync`, then atomically r
 - CUDA thumbnail/tile comparison suppresses duplicate frames and stabilizes three frames before OCR.
 - The colored accent prelocator keeps warmed active-card OCR near the previously measured 60–100 ms range.
 - Authoritative history/cache lookup is effectively immediate.
+- The managed Qwen3.8 Q6 server cold-starts in roughly 8–11 seconds and remains hot. On the September 1 text/quote and emoji clue set, accepted novel answers completed in approximately 3.2–4.7 seconds including local/web retrieval and a verifier pass.
 - Humanized typing retains the configured 0.4–1.1 second pre-delay and 0.03–0.08 second per-key delay, but performs that work during red. Green→Enter therefore needs only the configured 60 ms slack and final safety checks.
-- The local-model slow path is intentionally not part of live latency because none of the installed models met the required accuracy on the actual round.
+- Low-confidence or verifier-rejected novel answers remain `UNKNOWN` and never reach the composer.
 
 ## Implementation references
 
@@ -169,3 +179,6 @@ Writes use a same-directory temporary file, flush and `fsync`, then atomically r
 - [Python Tkinter event loop and `after`](https://docs.python.org/3/library/tkinter.html)
 - [Python ImageHash](https://github.com/JohannesBuchner/imagehash)
 - [Qwen3-VL official repository and generation guidance](https://github.com/QwenLM/Qwen3-VL)
+- [Qwen3.8 official repository](https://github.com/QwenLM/Qwen3.8)
+- [llama.cpp server and schema-constrained responses](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+- [MediaWiki full-text Search API](https://www.mediawiki.org/wiki/API:Search)

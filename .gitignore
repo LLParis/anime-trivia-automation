@@ -7,6 +7,8 @@ debug/
 runtime/
 config.json
 data/trivia_cache.json
+data/external/
+data/anime_knowledge.sqlite*
 data/.*.tmp
 *.egg-info/
 build/

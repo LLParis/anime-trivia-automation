@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 Region = tuple[int, int, int, int]
 
@@ -162,6 +163,33 @@ class VlmConfig:
 
 
 @dataclass(frozen=True)
+class NovelConfig:
+    """Hot local Qwen plus retrieval for clues absent from verified history."""
+
+    enabled: bool = False
+    endpoint: str = "http://127.0.0.1:8819"
+    model_alias: str = "arm-qwen38-q6-text"
+    manage_server: bool = False
+    server_executable: Path | None = None
+    model_path: Path | None = None
+    server_log_path: Path = Path("runtime/qwen38-trivia-server.log")
+    context_tokens: int = 4096
+    cache_type: str = "q4_0"
+    mtp_draft_tokens: int = 3
+    startup_timeout_seconds: float = 30.0
+    total_timeout_seconds: float = 5.0
+    model_timeout_seconds: float = 4.0
+    web_timeout_seconds: float = 2.0
+    max_search_queries: int = 3
+    max_search_results: int = 10
+    max_evidence_characters: int = 5000
+    min_confidence: float = 0.72
+    max_answer_characters: int = 96
+    answer_catalog_path: Path | None = Path("data/answer_catalog.seed.json")
+    knowledge_index_path: Path | None = Path("data/anime_knowledge.sqlite")
+
+
+@dataclass(frozen=True)
 class TypingConfig:
     enabled: bool = True
     expected_process_names: tuple[str, ...] = ("Discord.exe",)
@@ -219,6 +247,7 @@ class AppConfig:
     ocr: OcrConfig = field(default_factory=OcrConfig)
     matching: MatchConfig = field(default_factory=MatchConfig)
     vlm: VlmConfig = field(default_factory=VlmConfig)
+    novel: NovelConfig = field(default_factory=NovelConfig)
     typing: TypingConfig = field(default_factory=TypingConfig)
     status: StatusConfig = field(default_factory=StatusConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -238,6 +267,7 @@ def load_config(path: str | Path) -> AppConfig:
     ocr_raw = _section(raw, "ocr")
     match_raw = _section(raw, "matching")
     vlm_raw = _section(raw, "vlm")
+    novel_raw = _section(raw, "novel")
     typing_raw = _section(raw, "typing")
     status_raw = _section(raw, "status")
     runtime_raw = _section(raw, "runtime")
@@ -462,6 +492,62 @@ def load_config(path: str | Path) -> AppConfig:
             else (base_dir / candidate).resolve()
         )
 
+    server_executable_value = novel_raw.get("server_executable")
+    model_path_value = novel_raw.get("model_path")
+    answer_catalog_value = novel_raw.get(
+        "answer_catalog_path", "data/answer_catalog.seed.json"
+    )
+    knowledge_index_value = novel_raw.get(
+        "knowledge_index_path", "data/anime_knowledge.sqlite"
+    )
+    novel = NovelConfig(
+        enabled=bool(novel_raw.get("enabled", False)),
+        endpoint=str(novel_raw.get("endpoint", "http://127.0.0.1:8819")).rstrip(
+            "/"
+        ),
+        model_alias=str(novel_raw.get("model_alias", "arm-qwen38-q6-text")),
+        manage_server=bool(novel_raw.get("manage_server", False)),
+        server_executable=(
+            resolve_local(str(server_executable_value))
+            if server_executable_value is not None
+            else None
+        ),
+        model_path=(
+            resolve_local(str(model_path_value))
+            if model_path_value is not None
+            else None
+        ),
+        server_log_path=resolve_local(
+            str(novel_raw.get("server_log_path", "runtime/qwen38-trivia-server.log"))
+        ),
+        context_tokens=int(novel_raw.get("context_tokens", 4096)),
+        cache_type=str(novel_raw.get("cache_type", "q4_0")),
+        mtp_draft_tokens=int(novel_raw.get("mtp_draft_tokens", 3)),
+        startup_timeout_seconds=float(
+            novel_raw.get("startup_timeout_seconds", 30.0)
+        ),
+        total_timeout_seconds=float(novel_raw.get("total_timeout_seconds", 5.0)),
+        model_timeout_seconds=float(novel_raw.get("model_timeout_seconds", 4.0)),
+        web_timeout_seconds=float(novel_raw.get("web_timeout_seconds", 2.0)),
+        max_search_queries=int(novel_raw.get("max_search_queries", 3)),
+        max_search_results=int(novel_raw.get("max_search_results", 10)),
+        max_evidence_characters=int(
+            novel_raw.get("max_evidence_characters", 5000)
+        ),
+        min_confidence=float(novel_raw.get("min_confidence", 0.72)),
+        max_answer_characters=int(novel_raw.get("max_answer_characters", 96)),
+        answer_catalog_path=(
+            resolve_local(str(answer_catalog_value))
+            if answer_catalog_value is not None
+            else None
+        ),
+        knowledge_index_path=(
+            resolve_local(str(knowledge_index_value))
+            if knowledge_index_value is not None
+            else None
+        ),
+    )
+
     seed_cache_value = runtime_raw.get("seed_cache_path", "data/trivia_cache.seed.json")
     history_value = runtime_raw.get("history_path", "data/trivia_history.seed.json")
     runtime = RuntimeConfig(
@@ -493,6 +579,7 @@ def load_config(path: str | Path) -> AppConfig:
         ocr=ocr,
         matching=matching,
         vlm=vlm,
+        novel=novel,
         typing=typing,
         status=status,
         runtime=runtime,
@@ -654,6 +741,59 @@ def validate_config(config: AppConfig) -> None:
             raise ValueError("vlm.visual_consensus_passes must be 2 or 3")
         if config.vlm.max_answer_characters < 1:
             raise ValueError("vlm.max_answer_characters must be positive")
+    if config.novel.enabled:
+        endpoint = urlsplit(config.novel.endpoint)
+        try:
+            endpoint_port = endpoint.port
+        except ValueError as exc:
+            raise ValueError("novel.endpoint port is invalid") from exc
+        if (
+            endpoint.scheme != "http"
+            or endpoint.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or endpoint_port is None
+            or endpoint.username is not None
+            or endpoint.password is not None
+            or endpoint.path not in {"", "/"}
+            or endpoint.query
+            or endpoint.fragment
+        ):
+            raise ValueError("novel.endpoint must be loopback-only HTTP")
+        if not config.novel.model_alias.strip():
+            raise ValueError("novel.model_alias cannot be empty")
+        if config.novel.manage_server:
+            if (
+                config.novel.server_executable is None
+                or not config.novel.server_executable.is_file()
+            ):
+                raise ValueError("novel.server_executable is missing")
+            if (
+                config.novel.model_path is None
+                or not config.novel.model_path.is_file()
+            ):
+                raise ValueError("novel.model_path is missing")
+        if not 4096 <= config.novel.context_tokens <= 32768:
+            raise ValueError("novel.context_tokens must be between 4096 and 32768")
+        if config.novel.cache_type not in {"q4_0", "q8_0", "f16"}:
+            raise ValueError("novel.cache_type is invalid")
+        if not 1 <= config.novel.mtp_draft_tokens <= 8:
+            raise ValueError("novel.mtp_draft_tokens must be between 1 and 8")
+        if not 0.0 <= config.novel.min_confidence <= 1.0:
+            raise ValueError("novel.min_confidence must be between 0 and 1")
+        if not 1 <= config.novel.max_search_queries <= 4:
+            raise ValueError("novel.max_search_queries must be between 1 and 4")
+        if not 1 <= config.novel.max_search_results <= 10:
+            raise ValueError("novel.max_search_results must be between 1 and 10")
+        if config.novel.max_evidence_characters < 500:
+            raise ValueError("novel.max_evidence_characters is too small")
+        if min(
+            config.novel.startup_timeout_seconds,
+            config.novel.total_timeout_seconds,
+            config.novel.model_timeout_seconds,
+            config.novel.web_timeout_seconds,
+        ) <= 0:
+            raise ValueError("novel timeout values must be positive")
+        if config.novel.total_timeout_seconds > 10.0:
+            raise ValueError("novel.total_timeout_seconds cannot exceed 10 seconds")
     if config.typing.pre_delay_seconds[0] > config.typing.pre_delay_seconds[1]:
         raise ValueError("typing.pre_delay_seconds minimum exceeds maximum")
     if config.typing.pre_delay_seconds[0] < 0:
