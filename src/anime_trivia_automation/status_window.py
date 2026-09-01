@@ -413,7 +413,16 @@ def main() -> int:
                 updated = updated.replace(tzinfo=UTC)
             age = (datetime.now(UTC) - updated).total_seconds()
             worker_alive = _worker_alive(args.worker_pid)
-            stale = age > args.stale_after or not worker_alive
+            phase = str(state.get("phase", "STARTING"))
+            # CUDA/OCR cold starts can legitimately take tens of seconds.  The
+            # panel may report a stale stream, but it must never disappear while
+            # its owning worker is still alive and may recover.
+            stale_after = (
+                max(args.stale_after, 60.0)
+                if phase in {"STARTING", "LOADING"}
+                else args.stale_after
+            )
+            stale = age > stale_after or not worker_alive
             if stale and state.get("phase") not in {"STOPPED", "ERROR"}:
                 render(state, stale=True)
             if state.get("phase") == "STOPPED":
@@ -422,7 +431,7 @@ def main() -> int:
                 if time.monotonic() - terminal_at >= args.auto_close:
                     root.destroy()
                     return
-            elif state.get("phase") == "ERROR" or stale:
+            elif not worker_alive:
                 if terminal_at is None:
                     terminal_at = time.monotonic()
                 if time.monotonic() - terminal_at >= args.error_close:
