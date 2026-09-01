@@ -18,6 +18,14 @@ def normalize_question(text: str) -> str:
     return " ".join(text.split())
 
 
+def normalize_accessible_clue(text: str) -> str:
+    """Normalize exact Discord accessibility text while preserving emoji/ZWJ clues."""
+
+    text = unicodedata.normalize("NFKC", text).casefold()
+    text = text.replace("\ufe0f", "")
+    return " ".join(text.split()).strip()
+
+
 def short_signature(namespace: str, value: str) -> str:
     payload = f"{namespace}\0{value}".encode("utf-8", errors="replace")
     return f"{namespace}:{hashlib.sha256(payload).hexdigest()[:24]}"

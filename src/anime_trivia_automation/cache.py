@@ -12,9 +12,18 @@ from typing import Any
 
 from .config import MatchConfig
 from .models import CacheHit
-from .utils import normalize_question
+from .utils import normalize_accessible_clue, normalize_question
 
 LOGGER = logging.getLogger(__name__)
+
+# Versions before 0.5.0 promoted a single model guess and a spatially
+# unscoped OCR reveal directly into the durable cache.  A failed live round
+# proved that both sources can be wrong.  Purge those legacy records whenever
+# an existing local cache is opened; trusted seed data is overlaid afterward.
+UNTRUSTED_LEGACY_SOURCES = {
+    "qwen3-vl",
+    "authoritative-round-reveal",
+}
 
 
 def _utc_now() -> str:
@@ -25,16 +34,25 @@ class TriviaCache:
     """In-memory fuzzy/pHash indexes backed by an atomically replaced JSON file."""
 
     def __init__(
-        self, path: Path, config: MatchConfig, seed_path: Path | None = None
+        self,
+        path: Path,
+        config: MatchConfig,
+        seed_path: Path | None = None,
+        history_path: Path | None = None,
     ) -> None:
         self._path = path
         self._seed_path = seed_path
+        self._history_path = history_path
         self._config = config
         self._lock = threading.RLock()
         self._data: dict[str, Any] = {}
         self._text_index: dict[str, tuple[str, str]] = {}
         self._image_index: dict[str, Any] = {}
+        self._semantic_index: dict[tuple[str, str], tuple[str, str]] = {}
+        self._history_exact: dict[tuple[str, str], str] = {}
+        self._history_text: dict[tuple[str, str], str] = {}
         self._load()
+        self._load_history()
 
     @property
     def path(self) -> Path:
@@ -58,17 +76,29 @@ class TriviaCache:
                     "schema_version": 1,
                     "text_questions": {},
                     "image_hashes": {},
-                    "metadata": {"text_questions": {}, "image_hashes": {}},
+                    "semantic_questions": {},
+                    "metadata": {
+                        "text_questions": {},
+                        "image_hashes": {},
+                        "semantic_questions": {},
+                    },
                 }
             if not isinstance(raw, dict) or raw.get("schema_version") != 1:
                 raise ValueError(f"Unsupported cache schema in {self._path}")
             text_questions = raw.get("text_questions", {})
             image_hashes = raw.get("image_hashes", {})
+            semantic_questions = raw.setdefault("semantic_questions", {})
             if not isinstance(text_questions, dict) or not isinstance(
                 image_hashes, dict
             ):
                 raise TypeError("Cache answer maps must be JSON objects")
-            for key, value in [*text_questions.items(), *image_hashes.items()]:
+            if not isinstance(semantic_questions, dict):
+                raise TypeError("Semantic cache map must be a JSON object")
+            for key, value in [
+                *text_questions.items(),
+                *image_hashes.items(),
+                *semantic_questions.items(),
+            ]:
                 if (
                     not isinstance(key, str)
                     or not isinstance(value, str)
@@ -82,13 +112,75 @@ class TriviaCache:
                 raise TypeError("Cache metadata must be a JSON object")
             metadata.setdefault("text_questions", {})
             metadata.setdefault("image_hashes", {})
+            metadata.setdefault("semantic_questions", {})
             if not isinstance(metadata["text_questions"], dict) or not isinstance(
                 metadata["image_hashes"], dict
             ):
                 raise TypeError("Cache metadata maps must be JSON objects")
+            if not isinstance(metadata["semantic_questions"], dict):
+                raise TypeError("Semantic cache metadata must be a JSON object")
+
+            changed = False
+            for namespace in ("text_questions", "image_hashes"):
+                namespace_metadata = metadata[namespace]
+                for key, record in list(namespace_metadata.items()):
+                    source = record.get("source") if isinstance(record, dict) else None
+                    if source not in UNTRUSTED_LEGACY_SOURCES:
+                        continue
+                    raw[namespace].pop(key, None)
+                    namespace_metadata.pop(key, None)
+                    changed = True
+                    LOGGER.warning(
+                        "Removed untrusted legacy cache entry %s:%s (%s)",
+                        namespace,
+                        key,
+                        source,
+                    )
+
+            # The repository seed is reviewed data and is authoritative over
+            # the mutable runtime file.  Always overlay it so a corrected seed
+            # repairs an already-created local cache on the next launch.
+            if self._seed_path is not None and self._seed_path.exists():
+                with self._seed_path.open("r", encoding="utf-8") as handle:
+                    seed = json.load(handle)
+                if not isinstance(seed, dict) or seed.get("schema_version") != 1:
+                    raise ValueError(f"Unsupported cache schema in {self._seed_path}")
+                seed_metadata = seed.get("metadata", {})
+                for namespace in ("text_questions", "image_hashes"):
+                    seed_values = seed.get(namespace, {})
+                    if not isinstance(seed_values, dict):
+                        raise TypeError("Seed cache answer maps must be JSON objects")
+                    before = dict(raw[namespace])
+                    raw[namespace].update(seed_values)
+                    changed = changed or before != raw[namespace]
+                    source_metadata = (
+                        seed_metadata.get(namespace, {})
+                        if isinstance(seed_metadata, dict)
+                        else {}
+                    )
+                    if isinstance(source_metadata, dict):
+                        before_metadata = dict(metadata[namespace])
+                        managed_sources = {
+                            record.get("source")
+                            for record in source_metadata.values()
+                            if isinstance(record, dict) and record.get("source")
+                        }
+                        for key, record in list(metadata[namespace].items()):
+                            source = (
+                                record.get("source")
+                                if isinstance(record, dict)
+                                else None
+                            )
+                            if source in managed_sources and key not in seed_values:
+                                raw[namespace].pop(key, None)
+                                metadata[namespace].pop(key, None)
+                                changed = True
+                        metadata[namespace].update(source_metadata)
+                        changed = changed or before_metadata != metadata[namespace]
+
             self._data = raw
             self._rebuild_indexes_locked()
-            if should_create_local:
+            if should_create_local or changed:
                 self._save_locked()
             LOGGER.info(
                 "Cache loaded: %d text questions, %d image hashes (%s)",
@@ -126,6 +218,114 @@ class TriviaCache:
                 LOGGER.warning("Skipping invalid pHash key: %s", hash_text)
                 continue
             self._image_index[hash_text] = (parsed, answer)
+
+        self._semantic_index.clear()
+        for stored_key, answer in self._data["semantic_questions"].items():
+            answer_type, separator, normalized = stored_key.partition(":")
+            if separator and answer_type in {"character", "anime_title"} and normalized:
+                self._semantic_index[(answer_type, normalized)] = (stored_key, answer)
+
+    def _load_history(self) -> None:
+        if self._history_path is None or not self._history_path.exists():
+            return
+        with self._history_path.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+            raise ValueError(f"Unsupported history schema in {self._history_path}")
+        pairs = raw.get("pairs", [])
+        if not isinstance(pairs, list):
+            raise TypeError("History pairs must be a JSON array")
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                raise TypeError("Each history pair must be a JSON object")
+            clue = pair.get("clue")
+            expected_type = pair.get("type")
+            answer = pair.get("answer")
+            if (
+                not isinstance(clue, str)
+                or expected_type not in {"character", "anime_title"}
+                or not isinstance(answer, str)
+                or not answer.strip()
+            ):
+                raise ValueError("History pairs require clue, type, and answer")
+            exact_key = (expected_type, normalize_accessible_clue(clue))
+            text_key = (expected_type, normalize_question(clue))
+            indexes = [(self._history_exact, exact_key)]
+            if text_key[1]:
+                indexes.append((self._history_text, text_key))
+            for index, key in indexes:
+                existing = index.get(key)
+                if existing is not None and existing != answer:
+                    raise ValueError(f"Conflicting history answers for {clue!r}")
+                index[key] = answer
+        LOGGER.info(
+            "Authoritative Discord history loaded: %d clues (%s)",
+            len(self._history_exact),
+            self._history_path,
+        )
+
+    def match_history(
+        self, clue: str, expected_answer_type: str
+    ) -> CacheHit | None:
+        exact_key = (
+            expected_answer_type,
+            normalize_accessible_clue(clue),
+        )
+        runtime = self._semantic_index.get(exact_key)
+        if runtime is not None:
+            stored_key, answer = runtime
+            return CacheHit(
+                kind="history",
+                key=stored_key,
+                answer=answer,
+                score=100.0,
+            )
+        answer = self._history_exact.get(exact_key)
+        if answer is not None:
+            return CacheHit(
+                kind="history",
+                key=exact_key[1],
+                answer=answer,
+                score=100.0,
+            )
+
+        normalized = normalize_question(clue)
+        if not normalized:
+            return None
+        choices = [
+            key
+            for answer_type, key in self._history_text
+            if answer_type == expected_answer_type
+        ]
+        if not choices:
+            return None
+        try:
+            from rapidfuzz import fuzz, process
+        except ImportError as exc:
+            raise RuntimeError("RapidFuzz is required for history matching") from exc
+        ranked = process.extract(
+            normalized,
+            choices,
+            scorer=fuzz.WRatio,
+            limit=2,
+        )
+        if not ranked or float(ranked[0][1]) < self._config.text_score_threshold:
+            return None
+        best_key, best_score, _ = ranked[0]
+        runner_score = float(ranked[1][1]) if len(ranked) > 1 else None
+        if (
+            runner_score is not None
+            and float(best_score) - runner_score < self._config.text_score_margin
+        ):
+            return None
+        answer = self._history_text[(expected_answer_type, best_key)]
+        return CacheHit(
+            kind="history",
+            key=best_key,
+            answer=answer,
+            score=float(best_score),
+            runner_up_score=runner_score,
+        )
 
     def match_text(self, question: str) -> CacheHit | None:
         query = normalize_question(question)
@@ -269,6 +469,41 @@ class TriviaCache:
                 self._rebuild_indexes_locked()
                 raise
         LOGGER.info("Cached novel visual clue %s -> %s", hash_text, answer)
+
+    def add_semantic(
+        self,
+        clue: str,
+        expected_answer_type: str,
+        answer: str,
+        *,
+        source: str,
+    ) -> None:
+        if expected_answer_type not in {"character", "anime_title"}:
+            raise ValueError("Semantic clue answer type is invalid")
+        normalized = normalize_accessible_clue(clue)
+        if not normalized:
+            raise ValueError("Cannot cache an empty semantic clue")
+        key = f"{expected_answer_type}:{normalized}"
+        with self._lock:
+            existing = self._data["semantic_questions"].get(key)
+            if existing is not None and existing != answer:
+                LOGGER.warning("Preserving existing semantic answer for %r", clue)
+                return
+            previous_data = deepcopy(self._data)
+            try:
+                self._data["semantic_questions"][key] = answer
+                self._data["metadata"]["semantic_questions"][key] = {
+                    "source": source,
+                    "created_utc": _utc_now(),
+                    "clue": clue,
+                }
+                self._rebuild_indexes_locked()
+                self._save_locked()
+            except Exception:
+                self._data = previous_data
+                self._rebuild_indexes_locked()
+                raise
+        LOGGER.info("Cached authoritative semantic clue -> %s", answer)
 
     def _save_locked(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

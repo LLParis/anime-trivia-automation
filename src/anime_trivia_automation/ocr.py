@@ -299,6 +299,12 @@ class PromptExtractor:
             for line in lines
             if line.top >= header.top and line.top < selected_card_bottom
         ]
+        card_box = (
+            min(line.left for line in card_lines),
+            header.top,
+            max(line.right for line in card_lines),
+            selected_card_bottom,
+        )
         full_text = " ".join(line.text for line in card_lines)
         readiness, red_pixels, green_pixels = self._detect_readiness(
             frame,
@@ -415,6 +421,7 @@ class PromptExtractor:
             red_outline_pixels=red_pixels,
             green_outline_pixels=green_pixels,
             perceptual_hash=perceptual_hash,
+            card_box=card_box,
         )
 
     def _trim_visual_content(self, image: Any, np: Any) -> Any:

@@ -1,38 +1,60 @@
 {
   "schema_version": 1,
   "text_questions": {
-    "a gentle nature loving robot who is powerful enough to be counted among the world s seven greatest robots": "Mont Blanc",
+    "a gentle nature loving robot who is powerful enough to be counted among the world s seven greatest robots": "Epsilon",
     "a gentle wealthy student who films nearly everything and designs elaborate costumes for her magical best friend": "Tomoyo Daidouji",
+    "a german europol detective and advanced robot who investigates a series of connected murders involving the world s most powerful robots": "Gesicht",
+    "a quiet teenage professional shogi player who lives alone and gradually finds warmth with three sisters from a nearby household": "Rei Kiriyama",
     "a red haired ogre warrior who becomes one of a reincarnated slime s most trusted commanders": "Benimaru",
     "a short haired girl who fiercely protects her deaf older sister and initially distrusts the boy trying to reconnect with her": "Yuzuru Nishimiya",
     "a small sharp tongued girl nicknamed the palmtop tiger who is rarely seen without a wooden sword": "Taiga Aisaka",
     "a smiling first year bofurin student who wears an eyepatch and fights with a calm redirection based martial arts style": "Hayato Suo",
     "a tracksuit wearing shut in who is transported to another world and discovers that death can return him to an earlier point in time": "Subaru Natsuki",
     "a young assassin with the ability to read minds who works for a retired legendary hitman": "Shin Asakura",
+    "a young ainu hunter with a blue headband who possesses extensive knowledge of wilderness survival and traditional cooking": "Asirpa",
     "a young martial arts prodigy who fights as king kazma inside a vast virtual world": "Kazuma Ikezawa",
     "a young prince who begins as a timid hostage but gradually develops the composure and ambition needed to rule": "Canute",
+    "humankind cannot gain anything without first giving something in return": "Fullmetal Alchemist Brotherhood",
     "love is the most twisted curse of all": "Jujutsu Kaisen 0",
     "moon prism power make up": "Sailor Moon",
     "my drill is the drill that will pierce the heavens": "Gurren Lagann",
-    "talent is something you make bloom instinct is something you polish": "Haikyuu!!"
+    "sometimes living can be hard but it s only because we re alive that we can make each other laugh cry and be happy": "Fruits Basket",
+    "talent is something you make bloom instinct is something you polish": "Haikyu",
+    "we don t die for our friends we live for our friends": "Fairy Tail",
+    "why do fireflies have to die so soon": "Grave of the Fireflies"
   },
   "image_hashes": {
+    "9d353c6662d847b97e63dbcf6e30914085df3c3ec1cd643b930466d11f0e9324": "Space Brothers",
+    "c61c13ff3bc3fcc0c0fce71b3c0019fe38c30073e31cc71c8fe138c33ff0807d": "Akira",
+    "ce84383733fbcfc00e07c0fe38c3e3383bc08e0fe8ef3801e23c3bc1c71f38c7": "Space Brothers",
     "dd0f32d422f8592b7ad68791db85e1c48d08246e25bbd2d125fbd999da2484f6": "Delicious in Dungeon",
     "dc41936620be6c0923b1d8b3fbc113fcde7cb04e0ce6dc1a211eece163fb013e": "Castle in the Sky",
+    "e0401bff13ffe600b9c308f03e1f03e3fc0788d8c0f03f1f31e7fc04e33918e7": "Natsume's Book of Friends",
+    "e4401bff13ffe600f9c300f01e1d03e3fc07d898c0f0371f31e7fc86e33818e7": "Natsume's Book of Friends",
+    "e67f1ce10100e786fdf1087f1f0601f07fe1fecec07e178131c0dc63e39e1079": "Natsume's Book of Friends",
     "ee6f1c303191e3cf8c3cfc7f03e13380f38c1c38cc7fcfef3c77238039180087": "Neon Genesis Evangelion",
     "f0f003f00f0ffc1fe1f0e3e0f00f060ffe1f041fc1c0f0ffe7f80e0e0e1f1f00": "Neon Genesis Evangelion",
     "f0ff0f800f00f87ff1f8e0001f1f0780f03fffffe00000ff0fc0f81ffc7fc000": "Delicious in Dungeon",
-    "f1ff01000e00ff3fe1e0e0ffff0f0600fe7fc3c0c07fffff0200fc1f0f800038": "Castle in the Sky"
+    "f1ff01000e00ff3fe1e0e0ffff0f0600fe7fc3c0c07fffff0200fc1f0f800038": "Castle in the Sky",
+    "d1cb83cc3ab47c33253b25386c3c06c7c1cfd1e89bc39887d9fd1bc01203e47f": "Akira"
   },
   "metadata": {
     "text_questions": {
       "a gentle nature loving robot who is powerful enough to be counted among the world s seven greatest robots": {
-        "created_utc": "2026-08-31T00:00:00Z",
-        "source": "user-supplied-example"
+        "created_utc": "2026-09-01T02:30:00Z",
+        "source": "verified-discord-history"
       },
       "a gentle wealthy student who films nearly everything and designs elaborate costumes for her magical best friend": {
         "created_utc": "2026-08-31T00:00:00Z",
         "source": "user-supplied-example"
+      },
+      "a german europol detective and advanced robot who investigates a series of connected murders involving the world s most powerful robots": {
+        "created_utc": "2026-09-01T01:05:00Z",
+        "source": "verified-live-round"
+      },
+      "a quiet teenage professional shogi player who lives alone and gradually finds warmth with three sisters from a nearby household": {
+        "created_utc": "2026-09-01T01:05:00Z",
+        "source": "verified-live-round"
       },
       "a red haired ogre warrior who becomes one of a reincarnated slime s most trusted commanders": {
         "created_utc": "2026-08-31T00:00:00Z",
@@ -58,6 +80,10 @@
         "created_utc": "2026-08-31T20:00:00Z",
         "source": "user-supplied-example-1200"
       },
+      "a young ainu hunter with a blue headband who possesses extensive knowledge of wilderness survival and traditional cooking": {
+        "created_utc": "2026-09-01T01:05:00Z",
+        "source": "verified-live-round"
+      },
       "a young martial arts prodigy who fights as king kazma inside a vast virtual world": {
         "created_utc": "2026-08-31T00:00:00Z",
         "source": "user-supplied-example"
@@ -65,6 +91,10 @@
       "a young prince who begins as a timid hostage but gradually develops the composure and ambition needed to rule": {
         "created_utc": "2026-08-31T20:00:00Z",
         "source": "user-supplied-example-1200"
+      },
+      "humankind cannot gain anything without first giving something in return": {
+        "created_utc": "2026-09-01T01:05:00Z",
+        "source": "verified-live-round"
       },
       "love is the most twisted curse of all": {
         "created_utc": "2026-08-31T20:00:00Z",
@@ -78,12 +108,39 @@
         "created_utc": "2026-08-31T20:00:00Z",
         "source": "user-supplied-example-1200"
       },
+      "sometimes living can be hard but it s only because we re alive that we can make each other laugh cry and be happy": {
+        "created_utc": "2026-09-01T01:05:00Z",
+        "source": "verified-live-round"
+      },
       "talent is something you make bloom instinct is something you polish": {
-        "created_utc": "2026-08-31T20:00:00Z",
-        "source": "user-supplied-example-1200"
+        "created_utc": "2026-09-01T02:30:00Z",
+        "source": "verified-discord-history"
+      },
+      "we don t die for our friends we live for our friends": {
+        "created_utc": "2026-09-01T01:05:00Z",
+        "source": "verified-live-round"
+      },
+      "why do fireflies have to die so soon": {
+        "created_utc": "2026-09-01T01:05:00Z",
+        "source": "verified-live-round"
       }
     },
     "image_hashes": {
+      "9d353c6662d847b97e63dbcf6e30914085df3c3ec1cd643b930466d11f0e9324": {
+        "created_utc": "2026-09-01T02:40:00Z",
+        "hash_size": 16,
+        "source": "verified-live-screenshot-replay"
+      },
+      "c61c13ff3bc3fcc0c0fce71b3c0019fe38c30073e31cc71c8fe138c33ff0807d": {
+        "created_utc": "2026-09-01T01:05:00Z",
+        "hash_size": 16,
+        "source": "verified-live-round"
+      },
+      "ce84383733fbcfc00e07c0fe38c3e3383bc08e0fe8ef3801e23c3bc1c71f38c7": {
+        "created_utc": "2026-09-01T01:05:00Z",
+        "hash_size": 16,
+        "source": "verified-live-round"
+      },
       "dd0f32d422f8592b7ad68791db85e1c48d08246e25bbd2d125fbd999da2484f6": {
         "created_utc": "2026-08-31T21:47:00Z",
         "hash_size": 16,
@@ -93,6 +150,21 @@
         "created_utc": "2026-08-31T21:47:00Z",
         "hash_size": 16,
         "source": "normalized-user-supplied-example-1200"
+      },
+      "e0401bff13ffe600b9c308f03e1f03e3fc0788d8c0f03f1f31e7fc04e33918e7": {
+        "created_utc": "2026-09-01T01:05:00Z",
+        "hash_size": 16,
+        "source": "verified-live-round"
+      },
+      "e4401bff13ffe600f9c300f01e1d03e3fc07d898c0f0371f31e7fc86e33818e7": {
+        "created_utc": "2026-09-01T01:05:00Z",
+        "hash_size": 16,
+        "source": "verified-live-round"
+      },
+      "e67f1ce10100e786fdf1087f1f0601f07fe1fecec07e178131c0dc63e39e1079": {
+        "created_utc": "2026-09-01T02:40:00Z",
+        "hash_size": 16,
+        "source": "verified-live-screenshot-replay"
       },
       "ee6f1c303191e3cf8c3cfc7f03e13380f38c1c38cc7fcfef3c77238039180087": {
         "created_utc": "2026-08-31T21:47:00Z",
@@ -113,6 +185,11 @@
         "created_utc": "2026-08-31T21:32:00Z",
         "hash_size": 16,
         "source": "user-supplied-example-1200"
+      },
+      "d1cb83cc3ab47c33253b25386c3c06c7c1cfd1e89bc39887d9fd1bc01203e47f": {
+        "created_utc": "2026-09-01T02:40:00Z",
+        "hash_size": 16,
+        "source": "verified-live-screenshot-replay"
       }
     }
   }

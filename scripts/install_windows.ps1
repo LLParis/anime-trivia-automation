@@ -27,7 +27,8 @@ if ($actualPython.Trim() -ne $PythonVersion) {
 if ($LASTEXITCODE -ne 0) { throw 'pip bootstrap failed.' }
 
 # Remove the legacy second CUDA stack if repairing an earlier partial install.
-# PaddleOCR's Transformers engine shares one PyTorch/CUDA runtime with Qwen.
+# PaddleOCR's Transformers engine uses one PyTorch/CUDA runtime. The optional
+# experimental VLM code shares it when explicitly enabled.
 $legacyCudaPackages = @(
     'paddlepaddle-gpu',
     'nvidia-cuda-runtime-cu12',
@@ -61,4 +62,4 @@ if ($LASTEXITCODE -ne 0) { throw 'GPU runtime verification failed.' }
 & $venvPython -c "from anime_trivia_automation.config import load_config; from anime_trivia_automation.ocr import PaddleOCREngine; c=load_config(r'$repoRoot\config.example.json'); PaddleOCREngine(c.ocr); print('PaddleOCR smoke passed')"
 if ($LASTEXITCODE -ne 0) { throw 'PaddleOCR known-text smoke failed.' }
 
-Write-Host "Installed successfully. Next: copy config.example.json to config.json, calibrate the region, then run scripts\warm_models.py."
+Write-Host "Installed successfully. Next: copy config.example.json to config.json, calibrate the region, then double-click Test Anime Trivia.cmd."

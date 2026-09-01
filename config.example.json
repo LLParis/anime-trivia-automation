@@ -79,11 +79,12 @@
     "phash_distance_margin": 3
   },
   "vlm": {
-    "enabled": true,
+    "enabled": false,
     "model_id": "Qwen/Qwen3-VL-32B-Instruct",
     "device": "cuda:0",
     "quantization": "nf4",
     "allow_novel_visual_submission": false,
+    "allow_unverified_submission": false,
     "local_files_only": false,
     "ready_before_capture": true,
     "preload_in_background": false,
@@ -97,9 +98,14 @@
   "typing": {
     "enabled": true,
     "expected_process_names": ["Discord.exe"],
-    "expected_window_title_contains": "Discord",
+    "expected_window_title_contains": "Anime Soul - Discord",
     "pre_delay_seconds": [0.4, 1.1],
     "key_delay_seconds": [0.03, 0.08],
+    "draft_while_locked": true,
+    "verify_composer": true,
+    "auto_focus_composer": true,
+    "composer_name_prefix": "Message #💜anime-chat",
+    "composer_class_fragment": "slateTextArea",
     "respect_detected_countdown": true,
     "fallback_answer_open_delay_seconds": 5.0,
     "enter_after_open_slack_seconds": 0.06,
@@ -109,6 +115,7 @@
   "runtime": {
     "cache_path": "data/trivia_cache.json",
     "seed_cache_path": "data/trivia_cache.seed.json",
+    "history_path": "data/trivia_history.seed.json",
     "debug_dir": "debug",
     "save_prompt_crops": false,
     "scene_retry_limit": 1,

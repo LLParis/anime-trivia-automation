@@ -17,8 +17,8 @@ if not exist "config.json" (
   exit /b 1
 )
 
-echo Loading local OCR and Qwen models. Capture starts only after READY.
-echo Keep Discord on the calibrated primary monitor and press F12 to stop.
+echo Loading local OCR and verified trivia history. Capture starts only after READY.
+echo Keep Anime Soul #anime-chat foregrounded and press F12 to stop.
 echo.
 ".venv\Scripts\anime-trivia.exe" --config "config.json"
 echo.

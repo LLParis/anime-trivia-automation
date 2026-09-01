@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ReadinessConfig, TypingConfig
+from .discord import DiscordComposer, DiscordComposerLocator
 from .models import AnswerTask
 from .utils import sanitize_answer
 
@@ -22,6 +23,8 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ForegroundWindow:
+    hwnd: int
+    process_id: int
     process_name: str
     title: str
 
@@ -92,10 +95,14 @@ class ForegroundWindowGuard:
                     process_name = Path(path_buffer.value).name
             finally:
                 kernel32.CloseHandle(handle)
-        return ForegroundWindow(process_name=process_name, title=title_buffer.value)
+        return ForegroundWindow(
+            hwnd=int(hwnd),
+            process_id=int(process_id.value),
+            process_name=process_name,
+            title=title_buffer.value,
+        )
 
-    def allowed(self) -> tuple[bool, str]:
-        window = self.current()
+    def validate(self, window: ForegroundWindow | None) -> tuple[bool, str]:
         if window is None:
             return False, "foreground window could not be identified"
         if (
@@ -106,6 +113,9 @@ class ForegroundWindowGuard:
         if self._title_fragment and self._title_fragment not in window.title.casefold():
             return False, f"foreground title is {window.title!r}"
         return True, f"{window.process_name}: {window.title}"
+
+    def allowed(self) -> tuple[bool, str]:
+        return self.validate(self.current())
 
 
 class ActivePromptState:
@@ -220,6 +230,58 @@ class ActivePromptState:
                 and self._readiness == "ready"
             )
 
+    def wait_current_open(
+        self,
+        signature: str,
+        stop_event: threading.Event,
+        timeout: float = 2.0,
+    ) -> bool:
+        """Wait through OCR uncertainty and accept only a live red/green card."""
+
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while (
+                self._signature == signature
+                and self._uncertain
+                and not stop_event.is_set()
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(min(remaining, 0.05))
+            return (
+                not stop_event.is_set()
+                and self._signature == signature
+                and not self._uncertain
+                and self._readiness in {"locked", "ready"}
+            )
+
+    def is_open(self, signature: str) -> bool:
+        with self._condition:
+            return (
+                self._signature == signature
+                and not self._uncertain
+                and self._readiness in {"locked", "ready"}
+            )
+
+    def execute_if_ready(
+        self,
+        signature: str,
+        stop_event: threading.Event,
+        callback: Callable[[], bool],
+    ) -> bool:
+        """Hold the prompt-state lock across the last check and Enter dispatch."""
+
+        with self._condition:
+            if (
+                stop_event.is_set()
+                or self._signature != signature
+                or self._uncertain
+                or self._readiness != "ready"
+            ):
+                return False
+            return bool(callback())
+
     def get(self) -> str | None:
         with self._condition:
             return self._signature
@@ -244,6 +306,8 @@ def humanize_typing(
 
 
 class SafeKeyboardExecutor:
+    """Own and verify one Discord draft, then press Enter only on green."""
+
     def __init__(
         self,
         config: TypingConfig,
@@ -256,44 +320,134 @@ class SafeKeyboardExecutor:
         self._active_prompt = active_prompt
         self._stop_event = stop_event
         self._guard = ForegroundWindowGuard(config)
+        self._composer_locator = DiscordComposerLocator(
+            config.composer_name_prefix,
+            config.composer_class_fragment,
+        )
         try:
             from pynput.keyboard import Controller, Key
         except ImportError as exc:
             raise RuntimeError("pynput is required for keyboard execution") from exc
         self._controller = Controller()
         self._enter_key = Key.enter
-        self._backspace_key = Key.backspace
-        self._partial_characters = 0
+        self._orphaned_draft: str | None = None
 
-    def _clear_partial_if_safe(self) -> bool:
-        if self._partial_characters <= 0:
-            return True
-        allowed, reason = self._guard.allowed()
-        if not allowed:
+    def _remember_orphan(self, expected_prefix: str) -> None:
+        if expected_prefix:
+            self._orphaned_draft = expected_prefix
             LOGGER.warning(
-                "Partial Discord input retained until focus returns: %s", reason
+                "Retaining exact draft ownership for safe cleanup when Discord returns"
             )
-            return False
-        for _ in range(self._partial_characters):
-            self._controller.press(self._backspace_key)
-            self._controller.release(self._backspace_key)
-        LOGGER.info(
-            "Cleared %d partially typed macro characters", self._partial_characters
-        )
-        self._partial_characters = 0
-        return True
 
-    def _still_valid(self, signature: str, *, check_window: bool = True) -> bool:
-        if self._readiness_config.require_green_outline:
-            state_valid = self._active_prompt.wait_current_ready(
-                signature,
-                self._stop_event,
+    def _cleanup_orphan(self) -> bool:
+        expected = self._orphaned_draft
+        if not expected:
+            return True
+        window = self._guard.current()
+        allowed, _reason = self._guard.validate(window)
+        window = window if allowed else None
+        if window is None:
+            return False
+        composer = self._composer_locator.find(window.hwnd, window.process_id)
+        if composer is None:
+            return False
+        current = composer.value()
+        if current == "":
+            self._orphaned_draft = None
+            return True
+        if current != expected:
+            LOGGER.warning(
+                "Orphaned draft was changed by the user; leaving it untouched"
             )
-        else:
-            state_valid = self._active_prompt.wait_current(
-                signature,
-                self._stop_event,
-            )
+            self._orphaned_draft = None
+            return False
+        if not composer.focused() and self._config.auto_focus_composer:
+            composer.set_focus()
+            deadline = time.monotonic() + 0.25
+            while time.monotonic() < deadline and not composer.focused():
+                time.sleep(0.01)
+        if self._clear_owned_draft(composer, expected):
+            self._orphaned_draft = None
+            return True
+        return False
+
+    def service_orphan(self) -> None:
+        """Proactively clear an unchanged owned draft when Discord returns."""
+
+        if self._orphaned_draft:
+            self._cleanup_orphan()
+
+    def _claim_empty_composer(
+        self, window: ForegroundWindow
+    ) -> DiscordComposer | None:
+        if not self._config.verify_composer:
+            return None
+        composer = self._composer_locator.find(window.hwnd, window.process_id)
+        if composer is None:
+            return None
+        if composer.value() != "":
+            LOGGER.warning("Typing skipped: Discord composer is not empty")
+            return None
+        if not composer.focused() and self._config.auto_focus_composer:
+            composer.set_focus()
+            deadline = time.monotonic() + 0.25
+            while time.monotonic() < deadline and not composer.focused():
+                time.sleep(0.01)
+        if not composer.focused():
+            LOGGER.warning("Typing skipped: Discord composer is not focused")
+            return None
+        if composer.value() != "":
+            LOGGER.warning("Typing skipped: Discord composer changed while claiming it")
+            return None
+        LOGGER.info("Claimed empty Discord composer %r", composer.name)
+        return composer
+
+    def _clear_owned_draft(
+        self, composer: DiscordComposer | None, expected_prefix: str
+    ) -> bool:
+        if not expected_prefix:
+            return True
+        if composer is None:
+            LOGGER.warning("Cannot safely clear an unverified composer draft")
+            return False
+        window = self._guard.current()
+        allowed, reason = self._guard.validate(window)
+        if not allowed:
+            LOGGER.warning("Owned draft retained because %s", reason)
+            return False
+        try:
+            if not composer.focused() or composer.value() != expected_prefix:
+                LOGGER.warning(
+                    "Composer diverged from the macro-owned draft; no user text was erased"
+                )
+                return False
+            composer.clear_owned_value()
+            if composer.value() != "":
+                LOGGER.warning("Targeted Discord draft cleanup did not clear the editor")
+                return False
+            LOGGER.info("Cleared exact macro-owned draft after cancellation")
+            return True
+        except Exception:
+            LOGGER.exception("Could not safely clear the macro-owned draft")
+            return False
+
+    def _clear_or_remember(
+        self, composer: DiscordComposer | None, expected_prefix: str
+    ) -> None:
+        if composer is not None:
+            try:
+                if composer.value() != expected_prefix:
+                    return
+            except Exception:
+                pass
+        if not self._clear_owned_draft(composer, expected_prefix):
+            self._remember_orphan(expected_prefix)
+
+    def _still_open(self, signature: str, *, check_window: bool = True) -> bool:
+        state_valid = self._active_prompt.wait_current_open(
+            signature,
+            self._stop_event,
+        )
         if not state_valid:
             return False
         if check_window:
@@ -303,24 +457,16 @@ class SafeKeyboardExecutor:
                 return False
         return True
 
-    def _wait_until(self, deadline: float, signature: str) -> bool:
+    def _wait_until_open(self, deadline: float, signature: str) -> bool:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return self._still_valid(signature, check_window=False)
+                return self._still_open(signature, check_window=False)
             if self._stop_event.wait(min(remaining, 0.05)):
                 return False
-            if self._readiness_config.require_green_outline:
-                state_valid = self._active_prompt.wait_current_ready(
-                    signature,
-                    self._stop_event,
-                )
-            else:
-                state_valid = self._active_prompt.wait_current(
-                    signature,
-                    self._stop_event,
-                )
-            if not state_valid:
+            if not self._active_prompt.wait_current_open(
+                signature, self._stop_event
+            ):
                 return False
 
     def execute(self, task: AnswerTask) -> bool:
@@ -328,11 +474,20 @@ class SafeKeyboardExecutor:
         if answer is None:
             LOGGER.warning("Rejected unsafe/empty answer: %r", task.answer)
             return False
-        if self._readiness_config.require_green_outline:
+        if not self._config.enabled:
             LOGGER.info(
-                "Answer resolved while locked; waiting for green outline on %s",
-                task.question_label or "the active round",
+                "DRY RUN [%s] %s -> %s", task.source, task.question_label or "?", answer
             )
+            return True
+
+        if not self._cleanup_orphan():
+            LOGGER.warning("Typing skipped until the previous owned draft is resolved")
+            return False
+
+        if (
+            self._readiness_config.require_green_outline
+            and not self._config.draft_while_locked
+        ):
             if not self._active_prompt.wait_ready(
                 task.prompt_signature,
                 self._stop_event,
@@ -340,63 +495,51 @@ class SafeKeyboardExecutor:
             ):
                 LOGGER.warning("Green-outline gate timed out or the round changed")
                 return False
-            ready_observed_at = time.monotonic()
-            LOGGER.info("Green outline confirmed; humanized typing may begin")
-        else:
-            ready_observed_at = time.monotonic()
 
-        if not self._config.enabled:
-            LOGGER.info(
-                "DRY RUN [%s] %s -> %s", task.source, task.question_label or "?", answer
-            )
-            return True
-
-        allowed, reason = self._guard.allowed()
-        if not allowed:
+        window = self._guard.current()
+        allowed, reason = self._guard.validate(window)
+        if not allowed or window is None:
             LOGGER.warning("Typing skipped: %s", reason)
             return False
-        if not self._clear_partial_if_safe():
+        composer = self._claim_empty_composer(window)
+        if self._config.verify_composer and composer is None:
             return False
 
         pre_delay = random.uniform(*self._config.pre_delay_seconds)
         delays = [random.uniform(*self._config.key_delay_seconds) for _ in answer]
-        if self._readiness_config.require_green_outline:
-            countdown = 0.0
-            answer_open_at = ready_observed_at
-            start_at = ready_observed_at + pre_delay
-        else:
-            countdown = (
-                task.countdown_seconds
-                if self._config.respect_detected_countdown
-                and task.countdown_seconds is not None
-                else self._config.fallback_answer_open_delay_seconds
-            )
-            answer_open_at = task.detected_at + max(0.0, countdown)
-            earliest_start = time.monotonic() + pre_delay
-            timed_start = answer_open_at - sum(delays)
-            start_at = max(earliest_start, timed_start)
+        start_at = time.monotonic() + pre_delay
         LOGGER.info(
-            "Humanized submit scheduled: answer=%r pre-delay=%.3fs type≈%.3fs open-delay=%.3fs",
+            "Humanized draft scheduled: answer=%r pre-delay=%.3fs type≈%.3fs",
             answer,
             pre_delay,
             sum(delays),
-            countdown,
         )
-        if not self._wait_until(start_at, task.prompt_signature):
-            LOGGER.info(
-                "Submission canceled before typing because the active prompt changed"
-            )
+        if not self._wait_until_open(start_at, task.prompt_signature):
+            LOGGER.info("Draft canceled before typing because the prompt changed")
             return False
 
+        typed_characters = 0
+
         def should_continue() -> bool:
-            return self._still_valid(task.prompt_signature, check_window=True)
+            if not self._still_open(task.prompt_signature, check_window=True):
+                return False
+            if composer is None:
+                return True
+            try:
+                return (
+                    composer.focused()
+                    and composer.value() == answer[:typed_characters]
+                )
+            except Exception:
+                LOGGER.exception("Discord composer validation failed")
+                return False
+
+        def record_character() -> None:
+            nonlocal typed_characters
+            typed_characters += 1
 
         if not should_continue():
             return False
-
-        def record_character() -> None:
-            self._partial_characters += 1
-
         if not humanize_typing(
             self._controller,
             answer,
@@ -404,25 +547,114 @@ class SafeKeyboardExecutor:
             should_continue,
             on_character_typed=record_character,
         ):
-            LOGGER.info("Submission canceled while typing")
-            self._clear_partial_if_safe()
+            LOGGER.info("Draft canceled while typing")
+            self._clear_or_remember(composer, answer[:typed_characters])
+            return False
+        if composer is not None:
+            try:
+                complete_draft = composer.value() == answer
+            except Exception:
+                LOGGER.warning(
+                    "Could not verify the completed Discord draft",
+                    exc_info=True,
+                )
+                self._remember_orphan(answer)
+                return False
+            if not complete_draft:
+                LOGGER.warning("Composer did not contain the exact completed macro draft")
+                self._clear_or_remember(composer, answer[:typed_characters])
+                return False
+
+        if self._readiness_config.require_green_outline:
+            LOGGER.info("Draft complete; waiting for green outline before Enter")
+            if not self._active_prompt.wait_ready(
+                task.prompt_signature,
+                self._stop_event,
+                self._readiness_config.ready_wait_timeout_seconds,
+            ):
+                LOGGER.warning("Green-outline gate timed out or the round changed")
+                self._clear_or_remember(composer, answer)
+                return False
+            if self._stop_event.wait(
+                self._config.enter_after_open_slack_seconds
+            ):
+                self._clear_or_remember(composer, answer)
+                return False
+
+        def dispatch_enter_if_owned() -> bool:
+            window = self._guard.current()
+            allowed, reason = self._guard.validate(window)
+            if not allowed:
+                LOGGER.warning("Typing aborted before Enter: %s", reason)
+                return False
+            if composer is not None:
+                try:
+                    if not composer.focused() or composer.value() != answer:
+                        LOGGER.warning("Composer ownership was lost before Enter")
+                        return False
+                except Exception:
+                    LOGGER.warning(
+                        "Could not validate composer ownership before Enter",
+                        exc_info=True,
+                    )
+                    return False
+
+            # From the first keydown call onward the outcome is consumed. Even
+            # an exception can mean Windows accepted the input, so rearming the
+            # same round would risk a duplicate submission.
+            try:
+                self._controller.press(self._enter_key)
+            except Exception:
+                LOGGER.warning(
+                    "Enter keydown outcome is unknown; suppressing duplicates",
+                    exc_info=True,
+                )
+                return True
+            try:
+                self._controller.release(self._enter_key)
+            except Exception:
+                LOGGER.warning(
+                    "Enter key release failed after keydown; suppressing duplicates",
+                    exc_info=True,
+                )
+            return True
+
+        if self._readiness_config.require_green_outline:
+            dispatched = self._active_prompt.execute_if_ready(
+                task.prompt_signature,
+                self._stop_event,
+                dispatch_enter_if_owned,
+            )
+        else:
+            dispatched = dispatch_enter_if_owned()
+        if not dispatched:
+            self._clear_or_remember(composer, answer)
             return False
 
-        enter_at = answer_open_at + self._config.enter_after_open_slack_seconds
-        if not self._wait_until(enter_at, task.prompt_signature):
-            LOGGER.info(
-                "Submission canceled before Enter because the active prompt changed"
-            )
-            self._clear_partial_if_safe()
-            return False
-        if not should_continue():
-            self._clear_partial_if_safe()
-            return False
-        self._controller.press(self._enter_key)
-        self._controller.release(self._enter_key)
-        self._partial_characters = 0
+        if composer is not None:
+            try:
+                deadline = time.monotonic() + 0.35
+                while time.monotonic() < deadline and composer.value() != "":
+                    time.sleep(0.01)
+                cleared = composer.value() == ""
+            except Exception:
+                LOGGER.warning(
+                    "Enter was sent and the Discord editor re-rendered; "
+                    "suppressing any duplicate submission",
+                    exc_info=True,
+                )
+                return True
+            if not cleared:
+                LOGGER.warning(
+                    "Enter was sent but Discord did not clear within 350ms; "
+                    "suppressing any duplicate submission"
+                )
+                return True
         LOGGER.info(
-            "Submitted [%s] %s -> %s", task.source, task.question_label or "?", answer
+            "Discord composer accepted [%s] %s -> %s",
+            task.source,
+            task.question_label or "?",
+            answer,
         )
         return True
 
@@ -471,6 +703,9 @@ class AnswerDispatcher:
         return True
 
     def submit(self, task: AnswerTask) -> bool:
+        if not self._active_prompt.is_open(task.prompt_signature):
+            LOGGER.debug("Rejected answer task for a non-live prompt")
+            return False
         with self._lock:
             if (
                 task.prompt_signature in self._pending
@@ -492,6 +727,10 @@ class AnswerDispatcher:
             try:
                 task = self._queue.get(timeout=0.2)
             except queue.Empty:
+                try:
+                    self._executor.service_orphan()
+                except Exception:
+                    LOGGER.debug("Orphan-draft service failed", exc_info=True)
                 continue
             succeeded = False
             try:

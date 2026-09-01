@@ -149,6 +149,7 @@ class VlmConfig:
     device: str = "cuda:0"
     quantization: str = "nf4"
     allow_novel_visual_submission: bool = False
+    allow_unverified_submission: bool = False
     local_files_only: bool = False
     ready_before_capture: bool = True
     preload_in_background: bool = False
@@ -167,6 +168,11 @@ class TypingConfig:
     expected_window_title_contains: str = "Discord"
     pre_delay_seconds: tuple[float, float] = (0.4, 1.1)
     key_delay_seconds: tuple[float, float] = (0.03, 0.08)
+    draft_while_locked: bool = True
+    verify_composer: bool = True
+    auto_focus_composer: bool = True
+    composer_name_prefix: str = "Message #"
+    composer_class_fragment: str = "slateTextArea"
     respect_detected_countdown: bool = True
     fallback_answer_open_delay_seconds: float = 5.0
     enter_after_open_slack_seconds: float = 0.06
@@ -178,6 +184,7 @@ class TypingConfig:
 class RuntimeConfig:
     cache_path: Path = Path("data/trivia_cache.json")
     seed_cache_path: Path | None = Path("data/trivia_cache.seed.json")
+    history_path: Path | None = Path("data/trivia_history.seed.json")
     debug_dir: Path = Path("debug")
     save_prompt_crops: bool = False
     scene_retry_limit: int = 1
@@ -363,6 +370,9 @@ def load_config(path: str | Path) -> AppConfig:
         allow_novel_visual_submission=bool(
             vlm_raw.get("allow_novel_visual_submission", False)
         ),
+        allow_unverified_submission=bool(
+            vlm_raw.get("allow_unverified_submission", False)
+        ),
         local_files_only=bool(vlm_raw.get("local_files_only", False)),
         ready_before_capture=bool(vlm_raw.get("ready_before_capture", True)),
         preload_in_background=bool(vlm_raw.get("preload_in_background", False)),
@@ -386,6 +396,15 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         pre_delay_seconds=(float(pre_delay[0]), float(pre_delay[1])),
         key_delay_seconds=(float(key_delay[0]), float(key_delay[1])),
+        draft_while_locked=bool(typing_raw.get("draft_while_locked", True)),
+        verify_composer=bool(typing_raw.get("verify_composer", True)),
+        auto_focus_composer=bool(typing_raw.get("auto_focus_composer", True)),
+        composer_name_prefix=str(
+            typing_raw.get("composer_name_prefix", "Message #")
+        ),
+        composer_class_fragment=str(
+            typing_raw.get("composer_class_fragment", "slateTextArea")
+        ),
         respect_detected_countdown=bool(
             typing_raw.get("respect_detected_countdown", True)
         ),
@@ -410,6 +429,7 @@ def load_config(path: str | Path) -> AppConfig:
         )
 
     seed_cache_value = runtime_raw.get("seed_cache_path", "data/trivia_cache.seed.json")
+    history_value = runtime_raw.get("history_path", "data/trivia_history.seed.json")
     runtime = RuntimeConfig(
         cache_path=resolve_local(
             str(runtime_raw.get("cache_path", "data/trivia_cache.json"))
@@ -418,6 +438,9 @@ def load_config(path: str | Path) -> AppConfig:
             resolve_local(str(seed_cache_value))
             if seed_cache_value is not None
             else None
+        ),
+        history_path=(
+            resolve_local(str(history_value)) if history_value is not None else None
         ),
         debug_dir=resolve_local(str(runtime_raw.get("debug_dir", "debug"))),
         save_prompt_crops=bool(runtime_raw.get("save_prompt_crops", False)),
@@ -619,6 +642,11 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("typing.expected_process_names cannot be empty")
     if not config.typing.expected_window_title_contains.strip():
         raise ValueError("typing.expected_window_title_contains cannot be empty")
+    if config.typing.verify_composer and (
+        not config.typing.composer_name_prefix.strip()
+        or not config.typing.composer_class_fragment.strip()
+    ):
+        raise ValueError("typing composer selectors cannot be empty")
     if config.typing.max_answer_characters < 1:
         raise ValueError("typing.max_answer_characters must be positive")
     if (

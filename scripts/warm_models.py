@@ -15,7 +15,7 @@ from anime_trivia_automation.vlm import LazyQwenResolver
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Download, load, and warm all live models before play."
+        description="Download/load OCR and, only when explicitly enabled, the experimental VLM."
     )
     parser.add_argument("--config", default=str(REPO_ROOT / "config.json"))
     parser.add_argument("--skip-vlm", action="store_true", help="Warm only PaddleOCR")

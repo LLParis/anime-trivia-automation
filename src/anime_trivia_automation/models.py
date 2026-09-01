@@ -59,11 +59,12 @@ class PromptObservation:
     red_outline_pixels: int = 0
     green_outline_pixels: int = 0
     perceptual_hash: str | None = None
+    card_box: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
 class CacheHit:
-    kind: Literal["text", "image"]
+    kind: Literal["text", "image", "history"]
     key: str
     answer: str
     score: float
