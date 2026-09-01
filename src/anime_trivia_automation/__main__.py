@@ -8,6 +8,8 @@ from pathlib import Path
 
 from .app import AnimeTriviaAutomation, inspect_image, print_inspection
 from .config import load_config
+from .status import NullStatus, OperatorStatus
+from .singleton import WorkerAlreadyRunningError, WorkerMutex
 from .utils import configure_logging
 
 
@@ -87,7 +89,52 @@ def main() -> int:
         print_inspection(result)
         return 0
 
-    AnimeTriviaAutomation(config, dry_run=args.dry_run).run()
+    try:
+        worker_mutex = WorkerMutex()
+    except WorkerAlreadyRunningError as exc:
+        logging.getLogger(__name__).error("%s", exc)
+        return 2
+    try:
+        status: OperatorStatus | NullStatus
+        if config.status.enabled:
+            status = OperatorStatus(
+                config.status,
+                config.runtime.status_path,
+                dry_run=args.dry_run,
+                # The panel is placed on the primary display.  Output-local
+                # capture coordinates are still conservative here: they either
+                # describe that display or make us avoid extra primary space.
+                avoid_region=config.capture.region,
+            )
+        else:
+            status = NullStatus()
+        status.launch()
+        status.emit(
+            "LOADING",
+            title="Loading OCR",
+            detail="Initializing CUDA capture, OCR, and verified history",
+            readiness="unknown",
+        )
+        try:
+            AnimeTriviaAutomation(
+                config,
+                dry_run=args.dry_run,
+                status=status,
+            ).run()
+        except Exception as exc:
+            status.emit(
+                "ERROR",
+                title="Startup or runtime failure",
+                detail=f"{type(exc).__name__}: {exc}",
+                readiness="closed",
+                event_id=f"fatal:{type(exc).__name__}:{exc}",
+                increment="fatal_errors",
+            )
+            raise
+        finally:
+            status.close()
+    finally:
+        worker_mutex.close()
     return 0
 
 

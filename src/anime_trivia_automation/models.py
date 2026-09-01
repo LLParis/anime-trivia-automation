@@ -81,3 +81,4 @@ class AnswerTask:
     countdown_seconds: float | None
     source: str
     stage_timings_ms: dict[str, float] = field(default_factory=dict)
+    round_token: str | None = None

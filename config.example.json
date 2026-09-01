@@ -112,10 +112,25 @@
     "max_answer_characters": 96,
     "stop_key": "f12"
   },
+  "status": {
+    "enabled": true,
+    "topmost": true,
+    "click_through": true,
+    "width": 560,
+    "height": 310,
+    "margin_x": 32,
+    "margin_y": 32,
+    "opacity": 0.96,
+    "poll_ms": 100,
+    "stale_after_seconds": 5.0,
+    "auto_close_seconds": 4.0,
+    "error_close_seconds": 15.0
+  },
   "runtime": {
     "cache_path": "data/trivia_cache.json",
     "seed_cache_path": "data/trivia_cache.seed.json",
     "history_path": "data/trivia_history.seed.json",
+    "status_path": "runtime/operator_status.json",
     "debug_dir": "debug",
     "save_prompt_crops": false,
     "scene_retry_limit": 1,

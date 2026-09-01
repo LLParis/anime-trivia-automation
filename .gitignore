@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 debug/
+runtime/
 config.json
 data/trivia_cache.json
 data/.*.tmp

@@ -18,6 +18,7 @@ from .config import AppConfig
 from .discord import DiscordQuestionLocator
 from .models import AnswerTask, CacheHit, PromptObservation, Scene
 from .ocr import PaddleOCREngine, PromptExtractor
+from .status import NullStatus, OperatorStatus
 from .typing import (
     ActivePromptState,
     AnswerDispatcher,
@@ -52,7 +53,13 @@ class PendingRound:
 class AnimeTriviaAutomation:
     """End-to-end latest-scene pipeline for Anime Soul trivia cards."""
 
-    def __init__(self, config: AppConfig, *, dry_run: bool = False) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        dry_run: bool = False,
+        status: OperatorStatus | NullStatus | None = None,
+    ) -> None:
         if not config.capture.calibrated:
             raise RuntimeError(
                 "capture.calibrated is false. Run scripts/calibrate_region.py "
@@ -61,11 +68,20 @@ class AnimeTriviaAutomation:
         if dry_run:
             config = replace(config, typing=replace(config.typing, enabled=False))
         self._config = config
+        self._status = status or NullStatus()
         self._stop_event = threading.Event()
         self._stop_lock = threading.Lock()
         self._stopped = False
         self._mailbox: LatestMailbox[Scene] = LatestMailbox()
         self._active_prompt = ActivePromptState()
+        self._status_session_id = 1
+        self._status_round_id = 0
+        self._active_status_signature: str | None = None
+        self._active_status_question_label: str | None = None
+        self._active_status_clue_key: str | None = None
+        self._active_status_token: str | None = None
+        self._active_status_closed = False
+        self._status_resolution: dict[str, str] = {}
 
         capture_width = config.capture.region[2] - config.capture.region[0]
         capture_height = config.capture.region[3] - config.capture.region[1]
@@ -86,6 +102,12 @@ class AnimeTriviaAutomation:
             seed_path=config.runtime.seed_cache_path,
             history_path=config.runtime.history_path,
         )
+        self._status.emit(
+            "LOADING",
+            title="Verified history ready",
+            detail=f"Loaded {self._cache.history_count} authoritative clues; preparing capture",
+            history_entries=self._cache.history_count,
+        )
         self._pending_round: PendingRound | None = None
         self._ephemeral_answer: tuple[str, str, str] | None = None
         self._quiz_ended = False
@@ -99,17 +121,109 @@ class AnimeTriviaAutomation:
             config.readiness,
             self._active_prompt,
             self._stop_event,
+            status=self._status,
         )
         self._dispatcher = AnswerDispatcher(
             self._keyboard, self._active_prompt, self._stop_event
         )
-        self._capture = DXCapture(config.capture, self._on_frame, self._stop_event)
+        self._capture = DXCapture(
+            config.capture,
+            self._on_frame,
+            self._stop_event,
+            on_started=self._on_capture_started,
+            on_error=self._on_capture_error,
+        )
         self._processor_thread = threading.Thread(
             target=self._processing_loop,
             name="trivia-inference",
             daemon=True,
         )
         self._emergency_stop = EmergencyStopListener(config.typing.stop_key, self.stop)
+
+    def _on_capture_started(self) -> None:
+        self._status.emit(
+            "ARMED",
+            title="Armed and monitoring",
+            detail="Waiting for the next Anime Soul trivia card",
+            question="—",
+            clue="Monitoring #💜anime-chat for a red trivia card",
+            answer="—",
+            source=f"{self._cache.history_count} verified local clues",
+            readiness="idle",
+            history_entries=self._cache.history_count,
+            event_id=f"armed:{self._status_session_id}",
+            new_round=True,
+        )
+
+    def _on_capture_error(self, detail: str) -> None:
+        self._status.emit(
+            "ERROR",
+            title="Capture failure",
+            detail=detail,
+            readiness="closed",
+            event_id=f"capture-error:{detail}",
+            increment="fatal_errors",
+        )
+
+    def _round_token(
+        self, observation: PromptObservation, *, live: bool
+    ) -> tuple[str, bool]:
+        clue_key = self._status_clue_key(observation)
+        same_round = False
+        if self._active_status_token is not None and not self._active_status_closed:
+            if observation.question_label and self._active_status_question_label:
+                same_round = (
+                    observation.question_label == self._active_status_question_label
+                )
+            elif observation.question_label and not self._active_status_question_label:
+                # The footer is occasionally missed on the first OCR pass.  A
+                # later question label upgrades the active fallback identity;
+                # it must not make one physical card count as two rounds.
+                same_round = clue_key == self._active_status_clue_key
+            elif not observation.question_label and self._active_status_question_label:
+                # Likewise, tolerate a transient footer miss after the card's
+                # stable numbered identity has already been established.
+                same_round = clue_key == self._active_status_clue_key
+            else:
+                same_round = observation.signature == self._active_status_signature
+
+        if live and not same_round:
+            self._status_round_id += 1
+            self._active_status_signature = observation.signature
+            self._active_status_question_label = observation.question_label
+            self._active_status_clue_key = clue_key
+            self._active_status_token = (
+                f"session-{self._status_session_id}:round-{self._status_round_id}:"
+                f"{observation.question_label or observation.signature}"
+            )
+            self._active_status_closed = False
+            return self._active_status_token, True
+        if same_round and self._active_status_token is not None:
+            self._active_status_signature = observation.signature
+            if observation.question_label:
+                self._active_status_question_label = observation.question_label
+            self._active_status_clue_key = clue_key
+            return self._active_status_token, False
+        return (
+            f"session-{self._status_session_id}:untracked:{observation.signature}",
+            False,
+        )
+
+    @staticmethod
+    def _status_clue_key(observation: PromptObservation) -> str:
+        if observation.hint_text:
+            return f"text:{normalize_question(observation.hint_text)}"
+        if observation.perceptual_hash:
+            return f"visual:{observation.perceptual_hash}"
+        return f"signature:{observation.signature}"
+
+    def _display_clue(self, observation: PromptObservation) -> str:
+        if (
+            self._accessible_round is not None
+            and self._accessible_round[0] == observation.signature
+        ):
+            return self._accessible_round[1]
+        return observation.hint_text or "Visual / emoji clue"
 
     def _on_visual_change(self, generation: int) -> None:
         # Pause any in-progress input immediately. OCR will either revalidate
@@ -130,6 +244,14 @@ class AnimeTriviaAutomation:
                 )
         except Exception:
             LOGGER.exception("Frame-change pipeline failed")
+            self._status.emit(
+                "ERROR",
+                title="Frame pipeline failure",
+                detail="Capture frame processing stopped",
+                readiness="closed",
+                event_id=f"frame-error:{self._change_gate.generation}",
+                increment="fatal_errors",
+            )
             self.stop()
 
     def _processing_loop(self) -> None:
@@ -154,6 +276,12 @@ class AnimeTriviaAutomation:
                         "; retrying once" if can_retry else "",
                     )
                     if not can_retry:
+                        self._status.emit(
+                            "ATTENTION",
+                            title="Scene processing failed",
+                            detail=f"Could not process scene {scene.generation}; monitoring continues",
+                            event_id=f"scene-error:{scene.generation}",
+                        )
                         break
                     if self._stop_event.wait(0.05):
                         break
@@ -179,7 +307,7 @@ class AnimeTriviaAutomation:
         extract_start = time.perf_counter()
         extract_ms = (time.perf_counter() - extract_start) * 1000.0
         if observation is None:
-            if quiz_complete:
+            if self._should_finish_without_card(quiz_complete):
                 self._finish_quiz()
                 return
             # A partial render or one OCR miss must never reactivate an older
@@ -214,6 +342,30 @@ class AnimeTriviaAutomation:
             ocr_ms,
             extract_ms,
         )
+        round_token, new_round = self._round_token(
+            observation,
+            live=observation.readiness in {"locked", "ready"},
+        )
+        if observation.readiness in {"locked", "ready"}:
+            if new_round:
+                self._status.emit(
+                    "RED" if observation.readiness == "locked" else "GREEN",
+                    title=(
+                        f"{observation.question_label or 'Question'} — "
+                        f"{'Get Ready' if observation.readiness == 'locked' else 'Answer Now'}"
+                    ),
+                    detail=(
+                        "Resolving while answers are locked"
+                        if observation.readiness == "locked"
+                        else "First observed after answers opened"
+                    ),
+                    question=observation.question_label or "Question",
+                    clue=self._display_clue(observation),
+                    readiness=observation.readiness,
+                    event_id=round_token,
+                    increment="rounds_seen",
+                    new_round=True,
+                )
 
         # Closed cards are terminal observations.  They may complete one
         # strictly tracked visual-learning transaction, but they can never
@@ -222,8 +374,26 @@ class AnimeTriviaAutomation:
         if observation.readiness == "closed":
             if self._quiz_ended:
                 return
+            active_round_closed = self._active_status_token == round_token
+            if active_round_closed:
+                self._status.emit(
+                    "CLOSED",
+                    title=f"{observation.question_label or 'Question'} — Round over",
+                    detail="Submission gate is closed",
+                    question=observation.question_label or "Question",
+                    clue=self._display_clue(observation),
+                    readiness="closed",
+                    event_id=round_token,
+                    increment="closed",
+                )
+                self._active_status_closed = True
             self._learn_from_authoritative_reveal(observation, spans)
-            if quiz_complete:
+            if (
+                quiz_complete
+                and active_round_closed
+                and self._active_status_closed
+                and self._is_final_question(observation.question_label)
+            ):
                 self._finish_quiz()
             return
         if observation.readiness not in {"locked", "ready"}:
@@ -269,6 +439,21 @@ class AnimeTriviaAutomation:
                 else f"score={hit.score:.1f}"
             )
             LOGGER.info("Fast-path %s hit (%s) -> %s", hit.kind, metric, answer)
+            previous_resolution = self._status_resolution.get(round_token)
+            self._status_resolution[round_token] = "known"
+            self._status.emit(
+                "KNOWN",
+                title=f"Known answer — {observation.question_label or 'Question'}",
+                detail=f"Verified {source.replace('-', ' ')} hit ({metric})",
+                question=observation.question_label or "Question",
+                clue=self._display_clue(observation),
+                answer=answer,
+                source=source,
+                readiness=observation.readiness,
+                event_id=round_token,
+                increment="known" if previous_resolution != "known" else None,
+                decrement="unknown" if previous_resolution == "unknown" else None,
+            )
         elif (
             self._ephemeral_answer is not None
             and self._ephemeral_answer[0] == observation.signature
@@ -308,6 +493,21 @@ class AnimeTriviaAutomation:
             LOGGER.warning(
                 "No confident answer for prompt %s", observation.question_label or "?"
             )
+            previous_resolution = self._status_resolution.get(round_token)
+            if previous_resolution != "known":
+                self._status_resolution[round_token] = "unknown"
+                self._status.emit(
+                    "UNKNOWN",
+                    title=f"Unknown — {observation.question_label or 'Question'}",
+                    detail="No answer will be submitted; waiting to learn the reveal",
+                    question=observation.question_label or "Question",
+                    clue=self._display_clue(observation),
+                    answer="SKIP",
+                    source="no verified match",
+                    readiness=observation.readiness,
+                    event_id=round_token,
+                    increment="unknown" if previous_resolution is None else None,
+                )
             return
         # Chat animations can advance the capture generation while the model
         # works.  Accept the answer only if OCR has re-confirmed the same live
@@ -333,6 +533,7 @@ class AnimeTriviaAutomation:
             countdown_seconds=observation.countdown_seconds,
             source=source,
             stage_timings_ms=timings,
+            round_token=round_token,
         )
         if self._dispatcher.submit(task):
             LOGGER.info(
@@ -354,7 +555,38 @@ class AnimeTriviaAutomation:
             "closed",
             self._change_gate.generation,
         )
+        self._status.emit(
+            "QUIZ_COMPLETE",
+            title="Quiz complete",
+            detail="Historical cards are inert; waiting for the next live quiz",
+            readiness="closed",
+            event_id=f"quiz-complete:{self._status_session_id}",
+        )
+        self._status_session_id += 1
+        self._active_status_signature = None
+        self._active_status_question_label = None
+        self._active_status_clue_key = None
+        self._active_status_token = None
+        self._active_status_closed = False
         LOGGER.info("Quiz-complete latch armed; historical cards are inert")
+
+    @staticmethod
+    def _is_final_question(question_label: str | None) -> bool:
+        """Only let a quiz-complete marker close the card it belongs to."""
+
+        if not question_label:
+            return False
+        match = re.search(r"\b(\d+)\s*/\s*(\d+)\b", question_label)
+        return bool(match and int(match.group(1)) == int(match.group(2)))
+
+    def _should_finish_without_card(self, quiz_complete: bool) -> bool:
+        """Accept a viewport marker only after our tracked final round closed."""
+
+        return (
+            quiz_complete
+            and self._active_status_closed
+            and self._is_final_question(self._active_status_question_label)
+        )
 
     def _match_authoritative_history(
         self, observation: PromptObservation
@@ -591,6 +823,21 @@ class AnimeTriviaAutomation:
             LOGGER.exception("Could not persist authoritative round answer")
             return
         self._pending_round = None
+        learned_token = self._active_status_token or (
+            f"session-{self._status_session_id}:{pending.signature}"
+        )
+        self._status.emit(
+            "LEARNED",
+            title=f"Learned — {pending.question_label}",
+            detail="The bot reveal is now a verified local fast-path answer",
+            question=pending.question_label,
+            clue=pending.clue or "Visual / emoji clue",
+            answer=answer,
+            source="authoritative bot reveal",
+            readiness="closed",
+            event_id=learned_token,
+            increment="learned",
+        )
         LOGGER.info(
             "Learned clue %s from its paired reveal -> %s",
             observation.question_label,
@@ -644,7 +891,7 @@ class AnimeTriviaAutomation:
 
         try:
             while not self._stop_event.wait(0.25):
-                pass
+                self._status.heartbeat()
         except KeyboardInterrupt:
             LOGGER.warning("Ctrl+C received")
             self.stop()
@@ -661,6 +908,13 @@ class AnimeTriviaAutomation:
                 return
             self._stopped = True
             self._stop_event.set()
+        self._status.emit(
+            "STOPPING",
+            title="Stopping safely",
+            detail="Closing capture and preserving any owned draft safely",
+            readiness="closed",
+            event_id="stopping",
+        )
         self._capture.request_stop()
         try:
             self._emergency_stop.stop()

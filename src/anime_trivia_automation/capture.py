@@ -177,10 +177,14 @@ class DXCapture:
         config: CaptureConfig,
         on_frame: Callable[[Any, float], None],
         stop_event: threading.Event,
+        on_started: Callable[[], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
     ) -> None:
         self._config = config
         self._on_frame = on_frame
         self._stop_event = stop_event
+        self._on_started = on_started
+        self._on_error = on_error
         self._camera: Any | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -198,6 +202,8 @@ class DXCapture:
             import dxcam
         except ImportError as exc:
             LOGGER.exception("DXcam import failed")
+            if self._on_error is not None:
+                self._on_error("DXcam import failed")
             self._stop_event.set()
             raise RuntimeError("dxcam==0.3.0 is required on Windows") from exc
 
@@ -229,6 +235,8 @@ class DXCapture:
                 if self._config.output_idx is not None
                 else "primary",
             )
+            if self._on_started is not None:
+                self._on_started()
 
             while not self._stop_event.is_set():
                 packet = camera.get_latest_frame(copy=True, with_timestamp=True)
@@ -241,6 +249,8 @@ class DXCapture:
         except Exception:
             if not self._stop_event.is_set():
                 LOGGER.exception("DXcam capture loop failed")
+                if self._on_error is not None:
+                    self._on_error("DXcam capture loop failed")
                 self._stop_event.set()
         finally:
             with self._lock:

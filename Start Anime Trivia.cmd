@@ -18,6 +18,7 @@ if not exist "config.json" (
 )
 
 echo Loading local OCR and verified trivia history. Capture starts only after READY.
+echo The top-right status panel shows every live decision and never accepts input.
 echo Keep Anime Soul #anime-chat foregrounded and press F12 to stop.
 echo.
 ".venv\Scripts\anime-trivia.exe" --config "config.json"

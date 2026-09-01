@@ -2,7 +2,7 @@
 
 Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, resolves only from verified local data, drafts the answer while the card is red, and presses Enter only after the same card turns green.
 
-Version 0.5.0 is the post-live-incident repair. The first 6 PM run proved that capture, OCR, and red/green recognition worked, but a single unverified model guess was not a safe answer source. Model-generated submissions are now disabled by default. The primary resolver is a local, server-verified history containing 120 exact clue→answer pairs (including Unicode emoji clues), plus the text and pHash caches.
+Version 0.6.0 is the visible-operator release built on the post-live-incident repair. The first 6 PM run proved that capture, OCR, and red/green recognition worked, but a single unverified model guess was not a safe answer source. Model-generated submissions are now disabled by default. The primary resolver is a local, server-verified history containing 120 exact clue→answer pairs (including Unicode emoji clues), plus the text and pHash caches.
 
 ```text
 DXcam 60 FPS physical-pixel crop
@@ -37,6 +37,8 @@ DXcam 60 FPS physical-pixel crop
 - `src/anime_trivia_automation/discord.py` — direct Windows UI Automation access to the semantic question and exact Discord composer.
 - `src/anime_trivia_automation/cache.py` — authoritative history, fuzzy text, strict pHash, semantic clues, and atomic JSON persistence.
 - `src/anime_trivia_automation/typing.py` — draft-before-green state machine, composer ownership, human-interference detection, and F12 stop.
+- `src/anime_trivia_automation/status.py` — structured low-frequency operator events, counters, heartbeat, and atomic status persistence.
+- `src/anime_trivia_automation/status_window.py` — passive top-right status panel using Windows no-activate/click-through styles.
 - `src/anime_trivia_automation/vlm.py` — experimental local-model resolver; live submission is disabled in config.
 - `data/trivia_history.seed.json` — 120 server-verified clue→answer pairs.
 - `data/answer_catalog.seed.json` — 207 unique server-observed canonical answer strings for future constrained retrieval work.
@@ -106,6 +108,20 @@ It is safe to start early. Leave the launcher open and keep Anime Soul's `#💜a
 
 Do not type manually in the composer while the macro owns a draft. During red, other users may see Discord's normal “typing…” indicator, but nothing is submitted. On green, the app rechecks the round, foreground window, focused editor, and complete draft before pressing Enter. Press F12 at any time to stop.
 
+## Operator status panel
+
+Live and dry-run launches now open a passive panel at the top-right of the primary monitor. It is topmost, click-through, excluded from the taskbar, and marked `WS_EX_NOACTIVATE`, so it cannot take keyboard focus from Discord. Its default placement is outside the calibrated left-side capture region.
+
+The panel reports:
+
+- `LOADING` and `ARMED` startup state;
+- question number, clue, and red/green/closed readiness;
+- `KNOWN` versus `UNKNOWN`, proposed answer, and exact source;
+- `DRAFTING`, `WAITING GREEN`, and `SUBMITTED` execution state;
+- reveal learning, errors, and session counters.
+
+`runtime/operator_status.json` is the atomic machine-readable snapshot. It receives a one-second heartbeat; if the worker stops updating unexpectedly, the panel changes to `STALE`. On a normal F12/Ctrl+C stop it shows `STOPPED` and closes after four seconds. Configure placement, opacity, polling, topmost, and click-through behavior in the `status` section of `config.json`.
+
 ## Trust and learning rules
 
 Resolution order is:
@@ -149,5 +165,7 @@ Writes use a same-directory temporary file, flush and `fsync`, then atomically r
 - [DXcam 0.3](https://github.com/ra1nty/DXcam/blob/v0.3.0/README.md)
 - [PaddleOCR 3.x OCR pipeline](https://www.paddleocr.ai/main/en/version3.x/pipeline_usage/OCR.html)
 - [Microsoft UI Automation](https://learn.microsoft.com/en-us/windows/win32/winauto/entry-uiauto-win32)
+- [Microsoft extended window styles (`WS_EX_NOACTIVATE`)](https://learn.microsoft.com/en-us/windows/win32/winmsg/extended-window-styles)
+- [Python Tkinter event loop and `after`](https://docs.python.org/3/library/tkinter.html)
 - [Python ImageHash](https://github.com/JohannesBuchner/imagehash)
 - [Qwen3-VL official repository and generation guidance](https://github.com/QwenLM/Qwen3-VL)

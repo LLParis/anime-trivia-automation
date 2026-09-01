@@ -181,10 +181,27 @@ class TypingConfig:
 
 
 @dataclass(frozen=True)
+class StatusConfig:
+    enabled: bool = True
+    topmost: bool = True
+    click_through: bool = True
+    width: int = 560
+    height: int = 310
+    margin_x: int = 32
+    margin_y: int = 32
+    opacity: float = 0.96
+    poll_ms: int = 100
+    stale_after_seconds: float = 5.0
+    auto_close_seconds: float = 4.0
+    error_close_seconds: float = 15.0
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     cache_path: Path = Path("data/trivia_cache.json")
     seed_cache_path: Path | None = Path("data/trivia_cache.seed.json")
     history_path: Path | None = Path("data/trivia_history.seed.json")
+    status_path: Path = Path("runtime/operator_status.json")
     debug_dir: Path = Path("debug")
     save_prompt_crops: bool = False
     scene_retry_limit: int = 1
@@ -203,6 +220,7 @@ class AppConfig:
     matching: MatchConfig = field(default_factory=MatchConfig)
     vlm: VlmConfig = field(default_factory=VlmConfig)
     typing: TypingConfig = field(default_factory=TypingConfig)
+    status: StatusConfig = field(default_factory=StatusConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
 
@@ -221,6 +239,7 @@ def load_config(path: str | Path) -> AppConfig:
     match_raw = _section(raw, "matching")
     vlm_raw = _section(raw, "vlm")
     typing_raw = _section(raw, "typing")
+    status_raw = _section(raw, "status")
     runtime_raw = _section(raw, "runtime")
 
     if "region" not in capture_raw:
@@ -418,6 +437,21 @@ def load_config(path: str | Path) -> AppConfig:
         stop_key=str(typing_raw.get("stop_key", "f12")).casefold(),
     )
 
+    status = StatusConfig(
+        enabled=bool(status_raw.get("enabled", True)),
+        topmost=bool(status_raw.get("topmost", True)),
+        click_through=bool(status_raw.get("click_through", True)),
+        width=int(status_raw.get("width", 560)),
+        height=int(status_raw.get("height", 310)),
+        margin_x=int(status_raw.get("margin_x", 32)),
+        margin_y=int(status_raw.get("margin_y", 32)),
+        opacity=float(status_raw.get("opacity", 0.96)),
+        poll_ms=int(status_raw.get("poll_ms", 100)),
+        stale_after_seconds=float(status_raw.get("stale_after_seconds", 5.0)),
+        auto_close_seconds=float(status_raw.get("auto_close_seconds", 4.0)),
+        error_close_seconds=float(status_raw.get("error_close_seconds", 15.0)),
+    )
+
     base_dir = config_path.parent
 
     def resolve_local(value: str) -> Path:
@@ -442,6 +476,9 @@ def load_config(path: str | Path) -> AppConfig:
         history_path=(
             resolve_local(str(history_value)) if history_value is not None else None
         ),
+        status_path=resolve_local(
+            str(runtime_raw.get("status_path", "runtime/operator_status.json"))
+        ),
         debug_dir=resolve_local(str(runtime_raw.get("debug_dir", "debug"))),
         save_prompt_crops=bool(runtime_raw.get("save_prompt_crops", False)),
         scene_retry_limit=int(runtime_raw.get("scene_retry_limit", 1)),
@@ -457,6 +494,7 @@ def load_config(path: str | Path) -> AppConfig:
         matching=matching,
         vlm=vlm,
         typing=typing,
+        status=status,
         runtime=runtime,
     )
     validate_config(config)
@@ -649,6 +687,20 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("typing composer selectors cannot be empty")
     if config.typing.max_answer_characters < 1:
         raise ValueError("typing.max_answer_characters must be positive")
+    if config.status.width < 360 or config.status.height < 220:
+        raise ValueError("status panel dimensions are too small")
+    if config.status.margin_x < 0 or config.status.margin_y < 0:
+        raise ValueError("status panel margins must be nonnegative")
+    if not 0.25 <= config.status.opacity <= 1.0:
+        raise ValueError("status.opacity must be between 0.25 and 1.0")
+    if not 50 <= config.status.poll_ms <= 2000:
+        raise ValueError("status.poll_ms must be between 50 and 2000")
+    if (
+        config.status.stale_after_seconds <= 0
+        or config.status.auto_close_seconds < 0
+        or config.status.error_close_seconds <= 0
+    ):
+        raise ValueError("status timing values are invalid")
     if (
         config.runtime.seed_cache_path is not None
         and config.runtime.seed_cache_path == config.runtime.cache_path

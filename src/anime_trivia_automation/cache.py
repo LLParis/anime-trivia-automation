@@ -58,6 +58,10 @@ class TriviaCache:
     def path(self) -> Path:
         return self._path
 
+    @property
+    def history_count(self) -> int:
+        return len(self._history_exact)
+
     def _load(self) -> None:
         with self._lock:
             should_create_local = not self._path.exists()

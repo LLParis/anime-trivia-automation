@@ -16,6 +16,7 @@ from typing import Any
 from .config import ReadinessConfig, TypingConfig
 from .discord import DiscordComposer, DiscordComposerLocator
 from .models import AnswerTask
+from .status import NullStatus, OperatorStatus
 from .utils import sanitize_answer
 
 LOGGER = logging.getLogger(__name__)
@@ -314,11 +315,13 @@ class SafeKeyboardExecutor:
         readiness_config: ReadinessConfig,
         active_prompt: ActivePromptState,
         stop_event: threading.Event,
+        status: OperatorStatus | NullStatus | None = None,
     ) -> None:
         self._config = config
         self._readiness_config = readiness_config
         self._active_prompt = active_prompt
         self._stop_event = stop_event
+        self._status = status or NullStatus()
         self._guard = ForegroundWindowGuard(config)
         self._composer_locator = DiscordComposerLocator(
             config.composer_name_prefix,
@@ -361,11 +364,6 @@ class SafeKeyboardExecutor:
             )
             self._orphaned_draft = None
             return False
-        if not composer.focused() and self._config.auto_focus_composer:
-            composer.set_focus()
-            deadline = time.monotonic() + 0.25
-            while time.monotonic() < deadline and not composer.focused():
-                time.sleep(0.01)
         if self._clear_owned_draft(composer, expected):
             self._orphaned_draft = None
             return True
@@ -416,7 +414,7 @@ class SafeKeyboardExecutor:
             LOGGER.warning("Owned draft retained because %s", reason)
             return False
         try:
-            if not composer.focused() or composer.value() != expected_prefix:
+            if composer.value() != expected_prefix:
                 LOGGER.warning(
                     "Composer diverged from the macro-owned draft; no user text was erased"
                 )
@@ -470,6 +468,7 @@ class SafeKeyboardExecutor:
                 return False
 
     def execute(self, task: AnswerTask) -> bool:
+        event_token = task.round_token or task.prompt_signature
         answer = sanitize_answer(task.answer, self._config.max_answer_characters)
         if answer is None:
             LOGGER.warning("Rejected unsafe/empty answer: %r", task.answer)
@@ -478,10 +477,28 @@ class SafeKeyboardExecutor:
             LOGGER.info(
                 "DRY RUN [%s] %s -> %s", task.source, task.question_label or "?", answer
             )
+            self._status.emit(
+                "KNOWN",
+                title=f"Dry run — {task.question_label or 'Question'}",
+                detail="Resolved successfully; no keys are enabled",
+                question=task.question_label or "Question",
+                answer=answer,
+                source=task.source,
+                readiness="dry-run",
+            )
             return True
 
         if not self._cleanup_orphan():
             LOGGER.warning("Typing skipped until the previous owned draft is resolved")
+            self._status.emit(
+                "ATTENTION",
+                title="Waiting for safe draft cleanup",
+                detail="A prior owned draft must be resolved before typing",
+                question=task.question_label or "Question",
+                answer=answer,
+                source=task.source,
+                event_id=f"{event_token}:orphan",
+            )
             return False
 
         if (
@@ -500,9 +517,27 @@ class SafeKeyboardExecutor:
         allowed, reason = self._guard.validate(window)
         if not allowed or window is None:
             LOGGER.warning("Typing skipped: %s", reason)
+            self._status.emit(
+                "ATTENTION",
+                title="Discord is not ready",
+                detail=reason,
+                question=task.question_label or "Question",
+                answer=answer,
+                source=task.source,
+                event_id=f"{event_token}:foreground",
+            )
             return False
         composer = self._claim_empty_composer(window)
         if self._config.verify_composer and composer is None:
+            self._status.emit(
+                "ATTENTION",
+                title="Composer safety check blocked typing",
+                detail="Use the empty #💜anime-chat message box",
+                question=task.question_label or "Question",
+                answer=answer,
+                source=task.source,
+                event_id=f"{event_token}:composer",
+            )
             return False
 
         pre_delay = random.uniform(*self._config.pre_delay_seconds)
@@ -540,13 +575,48 @@ class SafeKeyboardExecutor:
 
         if not should_continue():
             return False
-        if not humanize_typing(
-            self._controller,
-            answer,
-            delays,
-            should_continue,
-            on_character_typed=record_character,
-        ):
+        self._status.emit(
+            "DRAFTING",
+            title=f"Drafting — {task.question_label or 'Question'}",
+            detail="Typing the verified answer during the red reading window",
+            question=task.question_label or "Question",
+            answer=answer,
+            source=task.source,
+            readiness="locked",
+            event_id=event_token,
+            increment="drafts_started",
+        )
+        try:
+            draft_completed = humanize_typing(
+                self._controller,
+                answer,
+                delays,
+                should_continue,
+                on_character_typed=record_character,
+            )
+        except Exception:
+            LOGGER.warning(
+                "Character injection outcome is ambiguous; Enter is blocked",
+                exc_info=True,
+            )
+            if composer is not None:
+                try:
+                    current = composer.value()
+                except Exception:
+                    current = ""
+                if current and answer.startswith(current):
+                    self._remember_orphan(current)
+            self._status.emit(
+                "ATTENTION",
+                title="Draft interrupted",
+                detail="Character input was ambiguous; Enter is blocked",
+                question=task.question_label or "Question",
+                answer=answer,
+                source=task.source,
+                event_id=f"{event_token}:character-ambiguous",
+            )
+            return False
+        if not draft_completed:
             LOGGER.info("Draft canceled while typing")
             self._clear_or_remember(composer, answer[:typed_characters])
             return False
@@ -567,6 +637,16 @@ class SafeKeyboardExecutor:
 
         if self._readiness_config.require_green_outline:
             LOGGER.info("Draft complete; waiting for green outline before Enter")
+            self._status.emit(
+                "WAITING_GREEN",
+                title=f"Draft ready — {task.question_label or 'Question'}",
+                detail="Answer is complete; Enter remains blocked until green",
+                question=task.question_label or "Question",
+                answer=answer,
+                source=task.source,
+                readiness="locked",
+                event_id=event_token,
+            )
             if not self._active_prompt.wait_ready(
                 task.prompt_signature,
                 self._stop_event,
@@ -631,6 +711,18 @@ class SafeKeyboardExecutor:
             self._clear_or_remember(composer, answer)
             return False
 
+        self._status.emit(
+            "SUBMITTED",
+            title=f"Enter sent — {task.question_label or 'Question'}",
+            detail="Submission outcome consumed; duplicates are suppressed",
+            question=task.question_label or "Question",
+            answer=answer,
+            source=task.source,
+            readiness="ready",
+            event_id=event_token,
+            increment="submitted",
+        )
+
         if composer is not None:
             try:
                 deadline = time.monotonic() + 0.35
@@ -643,11 +735,29 @@ class SafeKeyboardExecutor:
                     "suppressing any duplicate submission",
                     exc_info=True,
                 )
+                self._status.emit(
+                    "SUBMITTED",
+                    title="Enter sent — confirmation unavailable",
+                    detail="Discord re-rendered; duplicate submission remains suppressed",
+                    question=task.question_label or "Question",
+                    answer=answer,
+                    source=task.source,
+                    readiness="ready",
+                )
                 return True
             if not cleared:
                 LOGGER.warning(
                     "Enter was sent but Discord did not clear within 350ms; "
                     "suppressing any duplicate submission"
+                )
+                self._status.emit(
+                    "SUBMITTED",
+                    title="Enter sent — composer did not clear",
+                    detail="The app will not retry this round",
+                    question=task.question_label or "Question",
+                    answer=answer,
+                    source=task.source,
+                    readiness="ready",
                 )
                 return True
         LOGGER.info(
@@ -655,6 +765,15 @@ class SafeKeyboardExecutor:
             task.source,
             task.question_label or "?",
             answer,
+        )
+        self._status.emit(
+            "SUBMITTED",
+            title=f"Submitted — {task.question_label or 'Question'}",
+            detail="Discord cleared the composer after Enter",
+            question=task.question_label or "Question",
+            answer=answer,
+            source=task.source,
+            readiness="ready",
         )
         return True
 
