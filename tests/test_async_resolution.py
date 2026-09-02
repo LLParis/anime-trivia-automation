@@ -79,6 +79,64 @@ def make_async_app(signature: str, fingerprint: str, round_token: str):
 
 
 class AsyncResolutionTests(unittest.TestCase):
+    def test_semantic_emoji_races_account_and_grounded_local_providers(self) -> None:
+        signature = "round:anime_title:3/10"
+        app, state = make_async_app(
+            signature,
+            "semantic:dragon hot springs ghost pig",
+            "session-1:round-3:3/10",
+        )
+        state.request.observation.prompt_kind = "visual"
+        app._accessible_round = (signature, "🐉 ♨️ 👻 🐖")
+        app._config.novel = SimpleNamespace(enabled=True)
+        app._config.gemini = SimpleNamespace(enabled=True)
+        app._config.vlm = SimpleNamespace(
+            allow_unverified_submission=False,
+            allow_novel_visual_submission=False,
+        )
+        app._novel = SimpleNamespace(ready_for_resolve=True)
+        app._gemini = SimpleNamespace(
+            availability=SimpleNamespace(available=True),
+            rate_limited=False,
+        )
+        app._config.antigravity.enabled = True
+        app._antigravity.availability.available = True
+
+        providers = app._enabled_resolution_providers(
+            state.request.observation, "🐉 ♨️ 👻 🐖"
+        )
+
+        self.assertEqual(providers, {"antigravity", "qwen"})
+
+    def test_raw_visual_uses_only_image_gemini(self) -> None:
+        signature = "round:anime_title:3/10"
+        app, state = make_async_app(
+            signature,
+            "visual:abc",
+            "session-1:round-3:3/10",
+        )
+        state.request.observation.prompt_kind = "visual"
+        app._accessible_round = None
+        app._config.novel = SimpleNamespace(enabled=True)
+        app._config.gemini = SimpleNamespace(enabled=True)
+        app._config.vlm = SimpleNamespace(
+            allow_unverified_submission=False,
+            allow_novel_visual_submission=False,
+        )
+        app._novel = SimpleNamespace(ready_for_resolve=True)
+        app._gemini = SimpleNamespace(
+            availability=SimpleNamespace(available=True),
+            rate_limited=False,
+        )
+        app._config.antigravity.enabled = True
+        app._antigravity.availability.available = True
+
+        providers = app._enabled_resolution_providers(
+            state.request.observation, "Visual / emoji clue"
+        )
+
+        self.assertEqual(providers, {"gemini"})
+
     def test_stop_cancels_long_gemini_coroutine_without_visual_timeout_delay(self) -> None:
         app = AnimeTriviaAutomation.__new__(AnimeTriviaAutomation)
         app._stop_event = threading.Event()
@@ -247,12 +305,15 @@ class AsyncResolutionTests(unittest.TestCase):
             )
         )
         self.assertEqual(state.candidate.answer, "First Answer")
+        # Its own alternatives wait until every provider has reported, so a
+        # fast provider cannot fill the guess cap before a slower one answers.
         self.assertEqual(
             [(task.answer, task.guess_index) for task in app._dispatcher.tasks],
-            [("First Answer", 1), ("Alt One", 2)],
+            [("First Answer", 1)],
         )
 
-        # A disagreeing provider becomes the next rung of the ladder.
+        # A disagreeing provider becomes the next rung of the ladder, then the
+        # held-back alternatives follow (deduplicated against the ladder).
         app._accept_resolution_result(
             ProviderResolution(
                 key=state.request.key,
@@ -266,7 +327,7 @@ class AsyncResolutionTests(unittest.TestCase):
         )
         self.assertEqual(
             [(task.answer, task.guess_index) for task in app._dispatcher.tasks],
-            [("First Answer", 1), ("Alt One", 2), ("Other Answer", 3)],
+            [("First Answer", 1), ("Other Answer", 2), ("Alt One", 3)],
         )
         self.assertEqual(state.pending, set())
         self.assertFalse(state.unknown_emitted)

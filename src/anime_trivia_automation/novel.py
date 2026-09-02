@@ -154,6 +154,12 @@ def _normalize(value: str) -> str:
     return " ".join(value.split())
 
 
+def _has_prose(value: str) -> bool:
+    """True when the clue contains real words (not an emoji-only rebus)."""
+
+    return sum(character.isalpha() for character in value) >= 3
+
+
 def _cache_clue(value: str) -> str:
     value = unicodedata.normalize("NFKC", value).casefold().replace("\ufe0f", "")
     return " ".join(value.split())
@@ -441,13 +447,9 @@ class NovelAnswerResolver:
                         ranked_alternatives.pop(index)
                         ranked_alternatives.insert(0, (previous, False))
                         break
-                if not evidence_hit:
-                    self._record_elapsed(
-                        started,
-                        confidence,
-                        "no ranked candidate matched independent evidence",
-                    )
-                    return None
+                # A guess that no local/web record echoes is still worth typing:
+                # wrong guesses cost nothing, silence costs the round. The
+                # detail records whether evidence backed it.
                 alternatives = [item[0] for item in ranked_alternatives]
                 detail = (
                     f"ranked from {len(evidence)} local/web records; "
@@ -737,9 +739,11 @@ class NovelAnswerResolver:
 
         ordered: list[tuple[int, str, list[dict[str, str]]]] = []
         if self._knowledge is not None and self._knowledge.available:
-            if clue:
+            if clue and _has_prose(clue):
                 # The clue itself, BM25-ranked over biographies/synopses, is the
                 # strongest local evidence: Anime Soul paraphrases those texts.
+                # Emoji rebuses are excluded: matching "dragon"/"hot springs"
+                # against titles literally produced Maid Dragon for Spirited Away.
                 direct = self._knowledge.search(clue, answer_type, limit=6)
                 if direct:
                     ordered.append((-1, "Local", direct))
@@ -935,10 +939,14 @@ class NovelAnswerResolver:
             "this quiz paraphrases; web records are search snippets:\n"
             f"{evidence}\n\n"
             f"Give {expected} that best explains every part of the clue as `answer`, and "
-            "up to 3 distinct runner-up candidates as `alternatives` (best first). If one "
-            "Local record clearly matches, use its exact title. A plausible guess beats "
-            "UNKNOWN; use UNKNOWN only when nothing fits. `confidence` is your calibrated "
-            "probability that `answer` is correct."
+            "up to 3 distinct runner-up candidates as `alternatives` (best first). Use "
+            "your own anime knowledge first; the records are retrieval hits that may be "
+            "irrelevant, so never choose one merely because its title shares words with "
+            "the clue. If a record's biography or synopsis genuinely matches, use its "
+            "exact title. For an emoji rebus the symbols stand for themes, objects, or "
+            "characters of the work (skull+sword+strawberry+ghost is Bleach), not for "
+            "words in its title. Always answer with your best guess, never UNKNOWN; "
+            "`confidence` is your calibrated probability that `answer` is correct."
         )
         result = self._chat_json(
             "anime_answer_synthesis",

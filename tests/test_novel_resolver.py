@@ -17,6 +17,49 @@ from anime_trivia_automation.novel import NovelAnswerResolver
 
 
 class NovelAnswerResolverTests(unittest.TestCase):
+    def test_evidence_backed_runner_up_is_promoted_over_ungrounded_first(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            resolver = self.make_resolver(directory)
+            evidence = [
+                {
+                    "source": "reference",
+                    "title": "Elias Ainsworth",
+                    "snippet": "The horned mage purchases Chise at an auction.",
+                    "url": "https://example.test/elias",
+                    "answer": "Elias Ainsworth",
+                    "answer_type": "character",
+                }
+            ]
+
+            def canonicalize(answer, *_args):
+                if "elias" in answer.casefold():
+                    return "Elias Ainsworth", True
+                return answer, False
+
+            with (
+                mock.patch.object(resolver, "_plan_queries", return_value=["one", "two"]),
+                mock.patch.object(resolver, "_search_web", return_value=evidence),
+                mock.patch.object(
+                    resolver,
+                    "_synthesize",
+                    return_value={
+                        "answer": "Cham",
+                        "alternatives": ["Elias Ainsworth"],
+                        "confidence": 0.91,
+                    },
+                ),
+                mock.patch.object(
+                    resolver, "_canonicalize_from_evidence", side_effect=canonicalize
+                ),
+            ):
+                ranked = resolver.resolve_ranked(
+                    "A horned mage buys a red-haired apprentice.", "character"
+                )
+
+            assert ranked is not None
+            self.assertEqual(ranked.answer, "Elias Ainsworth")
+            self.assertEqual(ranked.alternatives, ("Cham",))
+
     def test_endpoint_validation_rejects_loopback_userinfo_spoof(self) -> None:
         config = AppConfig(
             capture=CaptureConfig(region=(0, 0, 1920, 1080), calibrated=True),

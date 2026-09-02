@@ -134,7 +134,7 @@
     "max_search_queries": 3,
     "max_search_results": 10,
     "max_evidence_characters": 5000,
-    "min_confidence": 0.45,
+    "min_confidence": 0.3,
     "max_answer_characters": 96,
     "answer_catalog_path": "data/answer_catalog.seed.json",
     "knowledge_index_path": "data/anime_knowledge.sqlite"

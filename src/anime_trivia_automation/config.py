@@ -190,7 +190,7 @@ class NovelConfig:
     cache_type: str = "q4_0"
     mtp_draft_tokens: int = 3
     startup_timeout_seconds: float = 30.0
-    total_timeout_seconds: float = 8.0
+    total_timeout_seconds: float = 6.0
     model_timeout_seconds: float = 4.0
     web_timeout_seconds: float = 1.5
     max_search_queries: int = 3
@@ -233,7 +233,7 @@ class AntigravityConfig:
     model_slug: str = "gemini-3.7-flash-low"
     working_root: Path = Path("runtime/antigravity")
     preflight_timeout_seconds: float = 8.0
-    total_timeout_seconds: float = 6.0
+    total_timeout_seconds: float = 8.0
     min_confidence: float = 0.35
     max_answer_characters: int = 96
     max_clue_characters: int = 2000

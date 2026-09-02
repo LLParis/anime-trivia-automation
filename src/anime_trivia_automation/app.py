@@ -1093,7 +1093,19 @@ class AnimeTriviaAutomation:
         # queued immediately; every later distinct answer (from another
         # provider or from a provider's own alternatives) becomes a follow-up
         # guess that the dispatcher spaces out while the card stays green.
-        added = self._add_resolution_guesses(state, result)
+        # Primary answers ladder immediately. A provider's own runner-up
+        # alternatives are weaker than another provider's primary answer, so
+        # they are held back until every provider has reported; otherwise a
+        # fast local guess plus its alternatives could fill the guess cap
+        # before the slower, stronger account lane delivers its answer.
+        added = self._add_resolution_guesses(state, result, include_alternatives=False)
+        if not state.pending:
+            for reported in state.results.values():
+                added.extend(
+                    self._add_resolution_guesses(
+                        state, reported, include_alternatives=True, primary=False
+                    )
+                )
         if added:
             self._announce_resolution_guesses(state, added)
             self._queue_resolution_candidate(state)
@@ -1114,7 +1126,12 @@ class AnimeTriviaAutomation:
         self._emit_unknown_if_complete(state)
 
     def _add_resolution_guesses(
-        self, state: AsyncResolutionRound, result: ProviderResolution
+        self,
+        state: AsyncResolutionRound,
+        result: ProviderResolution,
+        *,
+        include_alternatives: bool,
+        primary: bool = True,
     ) -> list[ProviderResolution]:
         """Append the result's distinct answers to the round's guess ladder."""
 
@@ -1122,9 +1139,12 @@ class AnimeTriviaAutomation:
             return []
         added: list[ProviderResolution] = []
         seen = {normalize_question(guess.answer or "") for guess in state.guesses}
-        ordered = [(result.answer, result.confidence, "")]
-        for index, alternative in enumerate(result.alternatives, start=1):
-            ordered.append((alternative, 0.0, f"alternative {index}"))
+        ordered: list[tuple[str, float, str]] = []
+        if primary:
+            ordered.append((result.answer, result.confidence, ""))
+        if include_alternatives:
+            for index, alternative in enumerate(result.alternatives, start=1):
+                ordered.append((alternative, 0.0, f"alternative {index}"))
         for answer, confidence, note in ordered:
             cleaned = sanitize_answer(answer, self._config.typing.max_answer_characters)
             if cleaned is None:
