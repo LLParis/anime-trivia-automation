@@ -35,6 +35,7 @@ class FakeComposer:
         self.has_focus = True
         self.name = "Message #💜anime-chat"
         self.focus_calls = 0
+        self.set_values: list[str] = []
 
     def value(self) -> str:
         return self.text
@@ -46,8 +47,18 @@ class FakeComposer:
         self.focus_calls += 1
         self.has_focus = True
 
+    def set_owned_value(self, value: str) -> None:
+        self.set_values.append(value)
+        self.text = value
+
     def clear_owned_value(self) -> None:
         self.text = ""
+
+
+class AmbiguousAtomicComposer(FakeComposer):
+    def set_owned_value(self, value: str) -> None:
+        super().set_owned_value(value)
+        raise RuntimeError("simulated exception after complete atomic write")
 
 
 class FakeGuard:
@@ -150,8 +161,10 @@ class FakeController:
         self.composer = composer
         self.enter_key = enter_key
         self.entered = False
+        self.type_calls: list[str] = []
 
     def type(self, character: str) -> None:
+        self.type_calls.append(character)
         self.composer.text += character
 
     def press(self, key: object) -> None:
@@ -174,12 +187,6 @@ class AmbiguousEnterController(FakeController):
             self.composer.text = ""
             raise RuntimeError("simulated post-dispatch failure")
         super().press(key)
-
-
-class AmbiguousCharacterController(FakeController):
-    def type(self, character: str) -> None:
-        self.composer.text += character
-        raise RuntimeError("simulated post-character failure")
 
 
 class RecordingStatus:
@@ -268,6 +275,45 @@ class LiveRegressionTests(unittest.TestCase):
             )
         )
         self.assertFalse(called)
+
+    def test_red_clue_correction_retires_stale_task_without_suppressing_round(self) -> None:
+        active = ActivePromptState()
+        signature = "round:anime_title:1/10"
+        active.update(signature, "locked", 1, "text:ocr-a")
+        composer = FakeComposer()
+        executor = make_executor(active, composer)
+        first = AnswerTask(
+            answer="Wrong Candidate",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="1/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=5.0,
+            source="test",
+            round_token="session-1:round-1",
+            clue_fingerprint="text:ocr-a",
+        )
+        first_result: list[bool] = []
+        thread = threading.Thread(
+            target=lambda: first_result.append(executor.execute(first))
+        )
+        thread.start()
+        time.sleep(0.05)
+        active.update(signature, "locked", 2, "text:ocr-b")
+        thread.join(1.0)
+        self.assertEqual(first_result, [False])
+
+        corrected = AnswerTask(
+            **{
+                **first.__dict__,
+                "answer": "Correct Candidate",
+                "clue_fingerprint": "text:ocr-b",
+            }
+        )
+        self.assertFalse(executor.is_suppressed(corrected))
+        active.update(signature, "ready", 3, "text:ocr-b")
+        self.assertTrue(executor.execute(corrected))
+        self.assertTrue(executor._controller.entered)
 
     def test_visual_fingerprint_uses_hash_without_semantic_emoji(self) -> None:
         app = AnimeTriviaAutomation.__new__(AnimeTriviaAutomation)
@@ -466,7 +512,26 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertEqual(match.group(1), "🚀 🌙 👨‍🚀 👬")
         self.assertEqual(match.group(3), "2")
 
-    def test_draft_is_complete_before_green_and_enter_waits(self) -> None:
+    def test_accessibility_reveal_parser_extracts_official_answer(self) -> None:
+        accessible_name = (
+            "Anime Soul6:04 PMTuesday, September 1, 2026 6:04 PM "
+            "Correct! @player got it in 10.6s — "
+            "the answer was Fate Zero. +50 AS Points (balance: 139,943)"
+        )
+        self.assertEqual(
+            DiscordQuestionLocator.parse_reveal_answer(accessible_name),
+            "Fate Zero",
+        )
+        self.assertTrue(
+            DiscordQuestionLocator.is_official_reveal_name(accessible_name)
+        )
+        self.assertFalse(
+            DiscordQuestionLocator.is_official_reveal_name(
+                "random user6:04 PM Anime Soul Correct! the answer was Naruto."
+            )
+        )
+
+    def test_composer_is_untouched_until_green_then_answer_is_atomic(self) -> None:
         active = ActivePromptState()
         signature = "round:anime_title:1/10"
         active.update(signature, "locked", 1)
@@ -487,14 +552,22 @@ class LiveRegressionTests(unittest.TestCase):
         thread = threading.Thread(target=lambda: result.append(executor.execute(task)))
         thread.start()
         deadline = time.monotonic() + 1.0
-        while composer.text != task.answer and time.monotonic() < deadline:
+        while (
+            not any(phase == "WAITING_GREEN" for phase, _ in recording.events)
+            and time.monotonic() < deadline
+        ):
             time.sleep(0.005)
-        self.assertEqual(composer.text, task.answer)
+        self.assertEqual(composer.text, "")
+        self.assertEqual(composer.set_values, [])
+        self.assertEqual(executor._controller.type_calls, [])
+        self.assertEqual(executor._composer_locator.find_calls, 0)
         self.assertFalse(executor._controller.entered)
         active.update(signature, "ready", 2)
         thread.join(1.0)
         self.assertEqual(result, [True])
         self.assertTrue(executor._controller.entered)
+        self.assertEqual(composer.set_values, [task.answer])
+        self.assertEqual(executor._controller.type_calls, [])
         self.assertEqual(composer.text, "")
         phases = [phase for phase, _fields in recording.events]
         self.assertIn("DRAFTING", phases)
@@ -649,7 +722,7 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertFalse(executor.execute(task))
         self.assertLess(time.monotonic() - started, 0.02)
 
-    def test_uncertain_capture_timeout_is_terminal_for_the_round(self) -> None:
+    def test_uncertain_green_wait_does_not_suppress_corrected_round(self) -> None:
         active = ActivePromptState()
         signature = "round:anime_title:1/10"
         active.update(signature, "ready", 1, "text:known")
@@ -675,7 +748,7 @@ class LiveRegressionTests(unittest.TestCase):
             clue_fingerprint="text:known",
         )
         self.assertFalse(executor.execute(task))
-        self.assertTrue(executor.is_suppressed(task))
+        self.assertFalse(executor.is_suppressed(task))
 
     def test_transient_uia_rerender_keeps_solved_task_pending(self) -> None:
         active = ActivePromptState()
@@ -733,7 +806,7 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertTrue(executor.is_suppressed(task))
         self.assertFalse(executor._controller.entered)
 
-    def test_manual_text_at_first_character_boundary_suppresses_round(self) -> None:
+    def test_manual_text_at_atomic_commit_boundary_suppresses_round(self) -> None:
         active = ActivePromptState()
         signature = "round:anime_title:1/10"
         active.update(signature, "ready", 1, "text:known")
@@ -906,13 +979,14 @@ class LiveRegressionTests(unittest.TestCase):
         result: list[bool] = []
         thread = threading.Thread(target=lambda: result.append(executor.execute(task)))
         thread.start()
-        deadline = time.monotonic() + 1.0
-        while len(composer.text) < 2 and time.monotonic() < deadline:
-            time.sleep(0.002)
-        composer.text += "USER"
+        time.sleep(0.05)
+        self.assertEqual(composer.text, "")
+        composer.text = "USER"
+        active.update(signature, "ready", 2)
         thread.join(1.0)
         self.assertEqual(result, [False])
-        self.assertIn("USER", composer.text)
+        self.assertEqual(composer.text, "USER")
+        self.assertEqual(composer.set_values, [])
         self.assertFalse(executor._controller.entered)
 
     def test_closed_race_after_ready_never_dispatches_enter(self) -> None:
@@ -942,14 +1016,87 @@ class LiveRegressionTests(unittest.TestCase):
         result: list[bool] = []
         thread = threading.Thread(target=lambda: result.append(executor.execute(task)))
         thread.start()
-        deadline = time.monotonic() + 1.0
-        while composer.text != task.answer and time.monotonic() < deadline:
-            time.sleep(0.005)
+        time.sleep(0.05)
+        self.assertEqual(composer.text, "")
         active.update(signature, "ready", 2)
         thread.join(1.0)
         self.assertEqual(result, [False])
         self.assertFalse(executor._controller.entered)
         self.assertEqual(composer.text, "")
+        self.assertEqual(composer.set_values, [])
+
+    def test_round_close_after_atomic_commit_clears_complete_value(self) -> None:
+        active = ActivePromptState()
+        signature = "round:anime_title:1/10"
+        active.update(signature, "ready", 1, "text:known")
+        composer = FakeComposer()
+        executor = make_executor(active, composer)
+        executor._config = TypingConfig(
+            **{
+                **executor._config.__dict__,
+                "enter_after_open_slack_seconds": 0.15,
+            }
+        )
+        task = AnswerTask(
+            answer="Fruits Basket",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="1/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="history-cache",
+            clue_fingerprint="text:known",
+        )
+        result: list[bool] = []
+        thread = threading.Thread(target=lambda: result.append(executor.execute(task)))
+        thread.start()
+        deadline = time.monotonic() + 1.0
+        while not composer.set_values and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(composer.text, task.answer)
+        active.update(signature, "closed", 2, "text:known")
+        thread.join(1.0)
+        self.assertEqual(result, [False])
+        self.assertFalse(executor._controller.entered)
+        self.assertEqual(composer.text, "")
+        self.assertEqual(composer.set_values, [task.answer])
+
+    def test_manual_edit_after_atomic_commit_blocks_enter_without_erasure(self) -> None:
+        active = ActivePromptState()
+        signature = "round:anime_title:1/10"
+        active.update(signature, "ready", 1, "text:known")
+        composer = FakeComposer()
+        executor = make_executor(active, composer)
+        executor._config = TypingConfig(
+            **{
+                **executor._config.__dict__,
+                "enter_after_open_slack_seconds": 0.15,
+            }
+        )
+        task = AnswerTask(
+            answer="Fruits Basket",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="1/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="history-cache",
+            round_token="session-1:round-1",
+            clue_fingerprint="text:known",
+        )
+        result: list[bool] = []
+        thread = threading.Thread(target=lambda: result.append(executor.execute(task)))
+        thread.start()
+        deadline = time.monotonic() + 1.0
+        while not composer.set_values and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(composer.text, task.answer)
+        composer.text += " USER"
+        thread.join(1.0)
+        self.assertEqual(result, [False])
+        self.assertEqual(composer.text, task.answer + " USER")
+        self.assertFalse(executor._controller.entered)
+        self.assertTrue(executor.is_suppressed(task))
 
     def test_enter_keydown_exception_is_consumed_without_duplicate(self) -> None:
         active = ActivePromptState()
@@ -984,31 +1131,29 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertIsNone(executor._orphaned_draft)
         self.assertEqual(composer.focus_calls, 0)
 
-    def test_ambiguous_character_injection_retains_exact_prefix_ownership(self) -> None:
+    def test_atomic_write_exception_after_full_value_can_be_verified(self) -> None:
         active = ActivePromptState()
         signature = "round:character:1/10"
-        active.update(signature, "locked", 1)
-        composer = FakeComposer()
+        active.update(signature, "ready", 1)
+        composer = AmbiguousAtomicComposer()
         executor = make_executor(active, composer)
-        executor._controller = AmbiguousCharacterController(
-            composer, executor._enter_key
-        )
         task = AnswerTask(
             answer="Rei Kiriyama",
             prompt_signature=signature,
             expected_answer_type="character",
             question_label="1/10",
             detected_at=time.monotonic(),
-            countdown_seconds=5.0,
+            countdown_seconds=0.0,
             source="history-cache",
         )
         with self.assertLogs(
             "anime_trivia_automation.typing", level="WARNING"
         ):
-            self.assertFalse(executor.execute(task))
-        self.assertEqual(composer.text, "R")
-        self.assertEqual(executor._orphaned_draft, "R")
-        self.assertFalse(executor._controller.entered)
+            self.assertTrue(executor.execute(task))
+        self.assertEqual(composer.set_values, [task.answer])
+        self.assertEqual(executor._controller.type_calls, [])
+        self.assertIsNone(executor._orphaned_draft)
+        self.assertTrue(executor._controller.entered)
 
 
 if __name__ == "__main__":

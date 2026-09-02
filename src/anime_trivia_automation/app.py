@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import queue
@@ -7,8 +8,10 @@ import re
 import threading
 import time
 from collections import Counter
-from dataclasses import replace
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,7 @@ from .cache import TriviaCache
 from .capture import DXCapture, GpuFrameChangeGate
 from .config import AppConfig
 from .discord import DiscordQuestionLocator
+from .gemini import GeminiProvider, GeminiRequest, GeminiResult
 from .models import AnswerTask, CacheHit, PromptObservation, Scene
 from .novel import NovelAnswerResolver
 from .ocr import PaddleOCREngine, PromptExtractor
@@ -49,7 +53,50 @@ class PendingRound:
     clue_fingerprint: str
     hashes: set[str] = field(default_factory=set)
     baseline_reveals: Counter[str] = field(default_factory=Counter)
+    baseline_reveal_ids: set[str] = field(default_factory=set)
     saw_ready: bool = False
+
+
+ResolutionKey = tuple[str, str]
+
+
+@dataclass(frozen=True)
+class ResolutionRequest:
+    key: ResolutionKey
+    round_token: str
+    signature: str
+    clue_fingerprint: str
+    clue: str
+    observation: PromptObservation
+    started_at: float
+
+
+@dataclass(frozen=True)
+class ProviderResolution:
+    key: ResolutionKey
+    provider: str
+    source: str
+    answer: str | None
+    confidence: float
+    elapsed_ms: float
+    detail: str = ""
+    error: str | None = None
+
+
+@dataclass
+class AsyncResolutionRound:
+    request: ResolutionRequest
+    providers: set[str]
+    pending: set[str]
+    ocr_ms: float
+    extract_ms: float
+    lookup_ms: float
+    results: dict[str, ProviderResolution] = field(default_factory=dict)
+    candidate: ProviderResolution | None = None
+    queued: bool = False
+    unknown_emitted: bool = False
+    conflicted: bool = False
+    retired: bool = False
 
 
 class AnimeTriviaAutomation:
@@ -84,7 +131,26 @@ class AnimeTriviaAutomation:
         self._active_status_token: str | None = None
         self._active_status_closed = False
         self._status_resolution: dict[str, str] = {}
-        self._novel_attempted: set[tuple[str, str]] = set()
+        self._resolution_rounds: dict[ResolutionKey, AsyncResolutionRound] = {}
+        self._active_resolution_key: ResolutionKey | None = None
+        self._resolution_results: queue.Queue[ProviderResolution] = queue.Queue(
+            maxsize=16
+        )
+        self._resolution_executor = ThreadPoolExecutor(
+            max_workers=3,
+            thread_name_prefix="trivia-resolver",
+        )
+        # No more than six provider calls can be running or waiting. A normal
+        # round submits at most local Qwen plus Gemini, so this covers a whole
+        # live card transition without permitting an unbounded executor queue.
+        self._resolution_slots = threading.BoundedSemaphore(6)
+        self._provider_locks: dict[str, Any] = {
+            "qwen": threading.Lock(),
+            "gemini": threading.BoundedSemaphore(2),
+            "vlm": threading.Lock(),
+        }
+        self._resolution_shutdown_lock = threading.Lock()
+        self._resolution_shutdown = False
 
         capture_width = config.capture.region[2] - config.capture.region[0]
         capture_height = config.capture.region[3] - config.capture.region[1]
@@ -118,6 +184,10 @@ class AnimeTriviaAutomation:
         self._accessible_round: tuple[str, str] | None = None
         self._vlm = LazyQwenResolver(config.vlm)
         self._novel = NovelAnswerResolver(config.novel)
+        self._gemini = GeminiProvider(config.gemini)
+        self._gemini_loop: asyncio.AbstractEventLoop | None = None
+        self._gemini_loop_thread: threading.Thread | None = None
+        self._gemini_loop_ready = threading.Event()
         self._foreground_guard = ForegroundWindowGuard(config.typing)
         self._question_locator = DiscordQuestionLocator()
 
@@ -295,6 +365,7 @@ class AnimeTriviaAutomation:
 
     def _processing_loop(self) -> None:
         while not self._stop_event.is_set():
+            self._drain_resolution_results()
             try:
                 scene = self._mailbox.get(timeout=0.2)
             except queue.Empty:
@@ -324,6 +395,7 @@ class AnimeTriviaAutomation:
                         break
                     if self._stop_event.wait(0.05):
                         break
+            self._drain_resolution_results()
 
     def _process_scene(self, scene: Scene) -> None:
         stage_start = time.perf_counter()
@@ -393,6 +465,8 @@ class AnimeTriviaAutomation:
             observation,
             live=observation.readiness in {"locked", "ready"},
         )
+        if new_round:
+            self._retire_other_resolutions(round_token)
         if observation.readiness in {"locked", "ready"}:
             if new_round:
                 self._status.emit(
@@ -441,6 +515,12 @@ class AnimeTriviaAutomation:
                     increment="closed",
                 )
                 self._active_status_closed = True
+                self._active_resolution_key = None
+                state = self._resolution_rounds.get(
+                    (round_token, self._clue_fingerprint(observation))
+                )
+                if state is not None:
+                    state.retired = True
             self._learn_from_authoritative_reveal(observation, spans)
             if (
                 quiz_complete
@@ -480,6 +560,7 @@ class AnimeTriviaAutomation:
             clue_fingerprint,
         ):
             return
+        self._active_resolution_key = (round_token, clue_fingerprint)
         if self._ephemeral_answer is not None and (
             self._ephemeral_answer[0] != observation.signature
             or self._ephemeral_answer[1] != clue_fingerprint
@@ -487,9 +568,12 @@ class AnimeTriviaAutomation:
             LOGGER.info("Discarded a candidate after the round clue changed")
             self._ephemeral_answer = None
 
-        answer: str | None
-        source: str
-        vlm_ms = 0.0
+        # Track every live round through green, including cache/model hits.
+        # Previously only unresolved observations refreshed this transaction,
+        # so all model-solved rounds missed saw_ready and could not learn their
+        # official bot reveal.
+        self._arm_pending_round(observation, scene)
+
         if hit is not None:
             answer = hit.answer
             source = f"{hit.kind}-cache"
@@ -514,154 +598,602 @@ class AnimeTriviaAutomation:
                 increment="known" if previous_resolution != "known" else None,
                 decrement="unknown" if previous_resolution == "unknown" else None,
             )
-        elif (
+            self._queue_answer_if_current(
+                answer=answer,
+                source=source,
+                observation=observation,
+                clue_fingerprint=clue_fingerprint,
+                round_token=round_token,
+                detected_at=scene.detected_at,
+                ocr_ms=ocr_ms,
+                extract_ms=extract_ms,
+                lookup_ms=lookup_ms,
+                provider_ms=0.0,
+            )
+            return
+
+        if (
             self._ephemeral_answer is not None
             and self._ephemeral_answer[0] == observation.signature
             and self._ephemeral_answer[1] == clue_fingerprint
         ):
             _signature, _fingerprint, answer, source = self._ephemeral_answer
             LOGGER.info("Reusing verified in-memory round answer -> %s", answer)
-        else:
-            self._arm_pending_round(observation, scene)
-            novel_clue = live_clue
-            if self._config.novel.enabled and novel_clue not in {
-                "Visual / emoji clue",
-                "<visual/emoji>",
-            }:
-                attempt_key = (
-                    round_token,
-                    clue_fingerprint,
-                )
-                source = "qwen38-retrieval-consensus"
-                if attempt_key in self._novel_attempted:
-                    answer = None
-                    LOGGER.debug("Novel resolver already attempted this exact round clue")
-                else:
-                    self._novel_attempted.add(attempt_key)
-                    self._status.emit(
-                        "RESOLVING",
-                        title=f"Researching — {observation.question_label or 'Question'}",
-                        detail="Grounding the new clue with live retrieval and local Qwen3.8",
-                        question=observation.question_label or "Question",
-                        clue=novel_clue,
-                        answer="—",
-                        source="local Qwen3.8 + retrieval",
-                        readiness=observation.readiness,
-                        event_id=round_token,
-                    )
-                    vlm_start = time.perf_counter()
-                    answer = self._novel.resolve(
-                        novel_clue,
-                        observation.expected_answer_type,
-                    )
-                    vlm_ms = (time.perf_counter() - vlm_start) * 1000.0
-            elif (
-                not self._config.vlm.allow_unverified_submission
-                or (
-                    observation.prompt_kind == "visual"
-                    and not self._config.vlm.allow_novel_visual_submission
-                )
-            ):
-                answer = None
-                source = "model-unverified"
-                LOGGER.warning(
-                    "Unverified model submission disabled; waiting for an authoritative reveal"
-                )
+            state = self._resolution_rounds.get((round_token, clue_fingerprint))
+            if state is not None:
+                self._queue_resolution_candidate(state)
             else:
-                vlm_start = time.perf_counter()
-                answer = self._vlm.resolve(observation)
-                vlm_ms = (time.perf_counter() - vlm_start) * 1000.0
-                source = "local-model-consensus"
-            if answer is not None:
-                # A model result can serve only this live round.  It is never
-                # promoted into the durable cache until a correctly associated
-                # Anime Soul reveal verifies it.
-                self._ephemeral_answer = (
-                    observation.signature,
-                    clue_fingerprint,
-                    answer,
-                    source,
+                self._queue_answer_if_current(
+                    answer=answer,
+                    source=source,
+                    observation=observation,
+                    clue_fingerprint=clue_fingerprint,
+                    round_token=round_token,
+                    detected_at=scene.detected_at,
+                    ocr_ms=ocr_ms,
+                    extract_ms=extract_ms,
+                    lookup_ms=lookup_ms,
+                    provider_ms=0.0,
                 )
-                if source == "qwen38-retrieval-consensus":
-                    previous_resolution = self._status_resolution.get(round_token)
-                    self._status_resolution[round_token] = "known"
-                    self._status.emit(
-                        "NOVEL",
-                        title=f"New answer — {observation.question_label or 'Question'}",
-                        detail=(
-                            f"Retrieval-grounded local consensus "
-                            f"({self._novel.last_confidence:.0%}, {vlm_ms:.0f} ms)"
-                        ),
-                        question=observation.question_label or "Question",
-                        clue=novel_clue,
-                        answer=answer,
-                        source=source,
-                        readiness=observation.readiness,
-                        event_id=round_token,
-                        increment="known" if previous_resolution != "known" else None,
-                        decrement=(
-                            "unknown" if previous_resolution == "unknown" else None
-                        ),
-                    )
+            return
 
-        if answer is None:
-            LOGGER.warning(
-                "No confident answer for prompt %s", observation.question_label or "?"
+        key = (round_token, clue_fingerprint)
+        state = self._resolution_rounds.get(key)
+        if state is None:
+            state = self._start_async_resolution(
+                key=key,
+                round_token=round_token,
+                clue_fingerprint=clue_fingerprint,
+                clue=live_clue,
+                observation=observation,
+                ocr_ms=ocr_ms,
+                extract_ms=extract_ms,
+                lookup_ms=lookup_ms,
             )
-            previous_resolution = self._status_resolution.get(round_token)
-            if previous_resolution != "known":
-                self._status_resolution[round_token] = "unknown"
+        self._drain_resolution_results()
+        self._queue_resolution_candidate(state)
+        self._emit_unknown_if_complete(state)
+
+    def _enabled_resolution_providers(
+        self, observation: PromptObservation, clue: str
+    ) -> set[str]:
+        providers: set[str] = set()
+        if self._config.novel.enabled and clue not in {
+            "Visual / emoji clue",
+            "<visual/emoji>",
+        }:
+            providers.add("qwen")
+        gemini_config = getattr(self._config, "gemini", None)
+        if (
+            gemini_config is not None
+            and gemini_config.enabled
+            and getattr(self, "_gemini", None) is not None
+            and self._gemini.availability.available
+        ):
+            providers.add("gemini")
+        if self._config.vlm.allow_unverified_submission and not (
+            observation.prompt_kind == "visual"
+            and not self._config.vlm.allow_novel_visual_submission
+        ):
+            providers.add("vlm")
+        return providers
+
+    def _start_async_resolution(
+        self,
+        *,
+        key: ResolutionKey,
+        round_token: str,
+        clue_fingerprint: str,
+        clue: str,
+        observation: PromptObservation,
+        ocr_ms: float,
+        extract_ms: float,
+        lookup_ms: float,
+    ) -> AsyncResolutionRound:
+        providers = self._enabled_resolution_providers(observation, clue)
+        request = ResolutionRequest(
+            key=key,
+            round_token=round_token,
+            signature=observation.signature,
+            clue_fingerprint=clue_fingerprint,
+            clue=clue,
+            observation=observation,
+            started_at=time.perf_counter(),
+        )
+        state = AsyncResolutionRound(
+            request=request,
+            providers=set(providers),
+            pending=set(providers),
+            ocr_ms=ocr_ms,
+            extract_ms=extract_ms,
+            lookup_ms=lookup_ms,
+        )
+        self._resolution_rounds[key] = state
+        if not providers:
+            LOGGER.warning(
+                "No verified resolver is enabled for prompt %s",
+                observation.question_label or "?",
+            )
+            return state
+
+        provider_label = " + ".join(sorted(providers))
+        self._status.emit(
+            "RESOLVING",
+            title=f"Researching — {observation.question_label or 'Question'}",
+            detail=f"Resolving concurrently with {provider_label}",
+            question=observation.question_label or "Question",
+            clue=clue,
+            answer="—",
+            source=provider_label,
+            readiness=observation.readiness,
+            event_id=round_token,
+        )
+        for provider in sorted(providers):
+            self._submit_resolution_provider(provider, request)
+        return state
+
+    def _submit_resolution_provider(
+        self, provider: str, request: ResolutionRequest
+    ) -> None:
+        if self._stop_event.is_set() or not self._resolution_slots.acquire(
+            blocking=False
+        ):
+            self._put_resolution_result(
+                ProviderResolution(
+                    key=request.key,
+                    provider=provider,
+                    source=f"{provider}-resolver",
+                    answer=None,
+                    confidence=0.0,
+                    elapsed_ms=0.0,
+                    error="resolver capacity unavailable",
+                )
+            )
+            return
+        try:
+            future = self._resolution_executor.submit(
+                self._run_resolution_provider, provider, request
+            )
+        except RuntimeError as exc:
+            self._resolution_slots.release()
+            self._put_resolution_result(
+                ProviderResolution(
+                    key=request.key,
+                    provider=provider,
+                    source=f"{provider}-resolver",
+                    answer=None,
+                    confidence=0.0,
+                    elapsed_ms=0.0,
+                    error=str(exc),
+                )
+            )
+            return
+        future.add_done_callback(
+            lambda completed, name=provider, key=request.key: self._provider_done(
+                name, key, completed
+            )
+        )
+
+    def _run_resolution_provider(
+        self, provider: str, request: ResolutionRequest
+    ) -> ProviderResolution:
+        started = time.perf_counter()
+        answer: str | None = None
+        confidence = 0.0
+        detail = ""
+        source = f"{provider}-resolver"
+        error: str | None = None
+        try:
+            with self._provider_locks[provider]:
+                if self._stop_event.is_set():
+                    raise RuntimeError("automation is stopping")
+                if provider == "qwen":
+                    source = "qwen38-retrieval-consensus"
+                    if (
+                        time.perf_counter()
+                        >= request.started_at
+                        + float(self._config.novel.total_timeout_seconds)
+                    ):
+                        raise TimeoutError("local resolver request expired in queue")
+                    answer = self._novel.resolve(
+                        request.clue,
+                        request.observation.expected_answer_type,
+                    )
+                    confidence = self._novel.last_confidence
+                    detail = self._novel.last_detail
+                elif provider == "gemini":
+                    source = "gemini-3.7-structured"
+                    gemini_result = self._resolve_with_gemini(request)
+                    answer = gemini_result.answer if gemini_result.accepted else None
+                    confidence = gemini_result.confidence
+                    detail = gemini_result.detail
+                elif provider == "vlm":
+                    source = "local-model-consensus"
+                    answer = self._vlm.resolve(request.observation)
+                else:
+                    raise ValueError(f"unknown resolver provider {provider!r}")
+        except Exception as exc:
+            # Provider exceptions may contain transport/request metadata.
+            # Preserve only the exception class so credentials can never
+            # escape through the app-level result queue or logs.
+            error = type(exc).__name__
+            LOGGER.warning(
+                "%s resolver failed closed for %s",
+                provider,
+                request.observation.question_label or "?",
+            )
+        return ProviderResolution(
+            key=request.key,
+            provider=provider,
+            source=source,
+            answer=answer,
+            confidence=confidence,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            detail=detail,
+            error=error,
+        )
+
+    def _resolve_with_gemini(self, request: ResolutionRequest) -> GeminiResult:
+        """Run Gemini on its one persistent event loop, never the OCR loop."""
+
+        image_bytes: bytes | None = None
+        image_mime_type: str | None = None
+        crop = request.observation.prompt_crop
+        if request.observation.prompt_kind == "visual" and crop is not None:
+            try:
+                import cv2
+
+                encoded, buffer = cv2.imencode(".png", crop)
+                if encoded:
+                    image_bytes = bytes(buffer)
+                    image_mime_type = "image/png"
+            except Exception:
+                LOGGER.debug("Gemini prompt-crop encoding failed", exc_info=True)
+        request_timeout = (
+            float(self._config.gemini.total_timeout_seconds)
+            if request.observation.prompt_kind == "visual"
+            else float(self._config.gemini.text_timeout_seconds)
+        )
+        gemini_request = GeminiRequest(
+            clue=request.clue,
+            expected_answer_type=request.observation.expected_answer_type,
+            image_bytes=image_bytes,
+            image_mime_type=image_mime_type,
+            deadline=request.started_at + request_timeout,
+        )
+        return self._run_gemini_coroutine(
+            self._gemini.resolve(gemini_request),
+            timeout=request_timeout + 1.0,
+        )
+
+    def _start_gemini_event_loop(self) -> None:
+        if self._gemini_loop_thread is not None:
+            return
+        loop = asyncio.new_event_loop()
+        self._gemini_loop = loop
+
+        def run_loop() -> None:
+            asyncio.set_event_loop(loop)
+            self._gemini_loop_ready.set()
+            loop.run_forever()
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            loop.close()
+
+        self._gemini_loop_thread = threading.Thread(
+            target=run_loop,
+            name="gemini-event-loop",
+            daemon=True,
+        )
+        self._gemini_loop_thread.start()
+        if not self._gemini_loop_ready.wait(2.0):
+            raise RuntimeError("Gemini event loop failed to start")
+
+    def _run_gemini_coroutine(
+        self,
+        coroutine: Any,
+        *,
+        timeout: float,
+        cancel_on_stop: bool = True,
+    ) -> Any:
+        loop = self._gemini_loop
+        if loop is None or not loop.is_running():
+            raise RuntimeError("Gemini event loop is not running")
+        future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        deadline = time.monotonic() + timeout
+        while True:
+            if cancel_on_stop and self._stop_event.is_set():
+                future.cancel()
+                raise RuntimeError("automation is stopping")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                future.cancel()
+                raise TimeoutError("Gemini coroutine exceeded its outer deadline")
+            try:
+                return future.result(timeout=min(remaining, 0.1))
+            except FutureTimeoutError:
+                continue
+
+    def _provider_done(
+        self,
+        provider: str,
+        key: ResolutionKey,
+        future: Future[ProviderResolution],
+    ) -> None:
+        try:
+            result = future.result()
+        except Exception as exc:
+            result = ProviderResolution(
+                key=key,
+                provider=provider,
+                source=f"{provider}-resolver",
+                answer=None,
+                confidence=0.0,
+                elapsed_ms=0.0,
+                error=type(exc).__name__,
+            )
+        finally:
+            self._resolution_slots.release()
+        self._put_resolution_result(result)
+
+    def _put_resolution_result(self, result: ProviderResolution) -> None:
+        try:
+            self._resolution_results.put_nowait(result)
+        except queue.Full:
+            # Capacity is larger than the submission semaphore, so this can
+            # occur only during abnormal shutdown or test injection.
+            LOGGER.error("Resolution result queue overflow; dropping %s", result.provider)
+
+    def _drain_resolution_results(self) -> None:
+        while True:
+            try:
+                result = self._resolution_results.get_nowait()
+            except queue.Empty:
+                return
+            self._accept_resolution_result(result)
+
+    def _accept_resolution_result(self, result: ProviderResolution) -> None:
+        state = self._resolution_rounds.get(result.key)
+        if state is None or result.provider not in state.pending:
+            LOGGER.info("Discarded duplicate or unknown %s resolver result", result.provider)
+            return
+        state.pending.remove(result.provider)
+        state.results[result.provider] = result
+        if (
+            state.retired
+            or self._quiz_ended
+            or self._active_status_token != state.request.round_token
+            or self._active_status_closed
+        ):
+            LOGGER.info(
+                "Discarded late %s result for stale round %s",
+                result.provider,
+                state.request.round_token,
+            )
+            state.retired = True
+            if not state.pending:
+                self._resolution_rounds.pop(result.key, None)
+            return
+        if state.pending:
+            return
+
+        answered = [item for item in state.results.values() if item.answer is not None]
+        answers_by_key: dict[str, list[ProviderResolution]] = {}
+        for item in answered:
+            answers_by_key.setdefault(normalize_question(item.answer or ""), []).append(item)
+        if len(answers_by_key) > 1:
+            state.conflicted = True
+            state.unknown_emitted = True
+            previous_resolution = self._status_resolution.get(
+                state.request.round_token
+            )
+            self._status_resolution[state.request.round_token] = "unknown"
+            LOGGER.warning(
+                "Resolver disagreement for %s; no answer will be submitted",
+                state.request.observation.question_label or "?",
+            )
+            if self._active_resolution_key == state.request.key:
                 self._status.emit(
-                    "UNKNOWN",
-                    title=f"Unknown — {observation.question_label or 'Question'}",
-                    detail="No answer will be submitted; waiting to learn the reveal",
-                    question=observation.question_label or "Question",
-                    clue=self._display_clue(observation),
+                    "ATTENTION",
+                    title=(
+                        f"Resolvers disagree — "
+                        f"{state.request.observation.question_label or 'Question'}"
+                    ),
+                    detail="Gemini and local evidence differ; manual answer required",
+                    question=state.request.observation.question_label or "Question",
+                    clue=state.request.clue,
                     answer="SKIP",
-                    source="no verified match",
-                    readiness=observation.readiness,
-                    event_id=round_token,
+                    source="resolver disagreement",
+                    readiness=state.request.observation.readiness,
+                    event_id=f"{state.request.round_token}:disagreement",
                     increment="unknown" if previous_resolution is None else None,
                 )
             return
-        # Chat animations can advance the capture generation while the model
-        # works.  Accept the answer only if OCR has re-confirmed the same live
-        # logical card; never rely on exact frame-generation equality.
-        if not self._active_prompt.wait_current_open(
-            observation.signature,
-            self._stop_event,
-            timeout=1.0,
-            clue_fingerprint=clue_fingerprint,
-        ):
-            LOGGER.info("Resolved answer belongs to a stale or closed prompt")
-            return
 
+        if answered:
+            # Prefer the frontier Gemini spelling when providers agree; if only
+            # one provider answered, its strict high-confidence gate already
+            # passed and every other provider explicitly abstained/failed.
+            state.candidate = max(
+                answered,
+                key=lambda item: (
+                    item.provider == "gemini",
+                    item.confidence,
+                    -item.elapsed_ms,
+                ),
+            )
+            candidate = state.candidate
+            assert candidate.answer is not None
+            if self._active_resolution_key == state.request.key:
+                self._ephemeral_answer = (
+                    state.request.signature,
+                    state.request.clue_fingerprint,
+                    candidate.answer,
+                    candidate.source,
+                )
+                previous_resolution = self._status_resolution.get(
+                    state.request.round_token
+                )
+                self._status_resolution[state.request.round_token] = "known"
+                confidence = (
+                    f", {candidate.confidence:.0%}"
+                    if candidate.confidence > 0
+                    else ""
+                )
+                self._status.emit(
+                    "NOVEL",
+                    title=(
+                        f"New answer — "
+                        f"{state.request.observation.question_label or 'Question'}"
+                    ),
+                    detail=(
+                        f"Providers finalized in {candidate.elapsed_ms:.0f} ms"
+                        f"{confidence}"
+                    ),
+                    question=state.request.observation.question_label or "Question",
+                    clue=state.request.clue,
+                    answer=candidate.answer,
+                    source=candidate.source,
+                    readiness=state.request.observation.readiness,
+                    event_id=state.request.round_token,
+                    increment="known" if previous_resolution != "known" else None,
+                    decrement=(
+                        "unknown" if previous_resolution == "unknown" else None
+                    ),
+                )
+        self._queue_resolution_candidate(state)
+        self._emit_unknown_if_complete(state)
+
+    def _queue_resolution_candidate(self, state: AsyncResolutionRound) -> bool:
+        candidate = state.candidate
+        if state.retired or state.queued or candidate is None or candidate.answer is None:
+            return False
+        if (
+            self._active_status_token != state.request.round_token
+            or self._active_status_closed
+            or not self._active_prompt.is_open(
+                state.request.signature,
+                state.request.clue_fingerprint,
+            )
+        ):
+            return False
+        state.queued = self._queue_answer_if_current(
+            answer=candidate.answer,
+            source=candidate.source,
+            observation=state.request.observation,
+            clue_fingerprint=state.request.clue_fingerprint,
+            round_token=state.request.round_token,
+            detected_at=state.request.observation.scene.detected_at,
+            ocr_ms=state.ocr_ms,
+            extract_ms=state.extract_ms,
+            lookup_ms=state.lookup_ms,
+            provider_ms=candidate.elapsed_ms,
+        )
+        return state.queued
+
+    def _queue_answer_if_current(
+        self,
+        *,
+        answer: str,
+        source: str,
+        observation: PromptObservation,
+        clue_fingerprint: str,
+        round_token: str,
+        detected_at: float,
+        ocr_ms: float,
+        extract_ms: float,
+        lookup_ms: float,
+        provider_ms: float,
+    ) -> bool:
+        if (
+            self._active_status_token != round_token
+            or self._active_status_closed
+            or not self._active_prompt.is_open(
+                observation.signature, clue_fingerprint
+            )
+        ):
+            return False
         timings = {
             "ocr": ocr_ms,
             "extract_hash": extract_ms,
             "lookup": lookup_ms,
-            "vlm": vlm_ms,
-            "novel": vlm_ms if source == "qwen38-retrieval-consensus" else 0.0,
+            "vlm": provider_ms,
+            "novel": provider_ms if source == "qwen38-retrieval-consensus" else 0.0,
         }
         task = AnswerTask(
             answer=answer,
             prompt_signature=observation.signature,
             expected_answer_type=observation.expected_answer_type,
             question_label=observation.question_label,
-            detected_at=scene.detected_at,
+            detected_at=detected_at,
             countdown_seconds=observation.countdown_seconds,
             source=source,
             stage_timings_ms=timings,
             round_token=round_token,
             clue_fingerprint=clue_fingerprint,
         )
-        if self._dispatcher.submit(task):
+        queued = self._dispatcher.submit(task)
+        if queued:
             LOGGER.info(
-                "Answer queued: %s (processing %.1fms, slow-path %.1fms)",
+                "Answer queued: %s (processing %.1fms, provider %.1fms)",
                 answer,
                 ocr_ms + extract_ms + lookup_ms,
-                vlm_ms,
+                provider_ms,
             )
+        return queued
+
+    def _emit_unknown_if_complete(self, state: AsyncResolutionRound) -> None:
+        if (
+            state.retired
+            or state.pending
+            or state.candidate is not None
+            or state.unknown_emitted
+        ):
+            return
+        if (
+            self._active_status_token != state.request.round_token
+            or self._active_status_closed
+            or not self._active_prompt.is_open(
+                state.request.signature,
+                state.request.clue_fingerprint,
+            )
+        ):
+            return
+        state.unknown_emitted = True
+        observation = state.request.observation
+        LOGGER.warning(
+            "No confident answer for prompt %s after all providers completed",
+            observation.question_label or "?",
+        )
+        previous_resolution = self._status_resolution.get(state.request.round_token)
+        if previous_resolution == "known":
+            return
+        self._status_resolution[state.request.round_token] = "unknown"
+        self._status.emit(
+            "UNKNOWN",
+            title=f"Unknown — {observation.question_label or 'Question'}",
+            detail="All enabled resolvers abstained; waiting to learn the reveal",
+            question=observation.question_label or "Question",
+            clue=state.request.clue,
+            answer="SKIP",
+            source="no verified match",
+            readiness=observation.readiness,
+            event_id=state.request.round_token,
+            increment="unknown" if previous_resolution is None else None,
+        )
+
+    def _retire_other_resolutions(self, round_token: str) -> None:
+        for key, state in list(self._resolution_rounds.items()):
+            if state.request.round_token != round_token:
+                if state.pending:
+                    state.retired = True
+                else:
+                    self._resolution_rounds.pop(key, None)
 
     def _finish_quiz(self) -> None:
         if self._quiz_ended:
@@ -671,6 +1203,8 @@ class AnimeTriviaAutomation:
         self._pending_round = None
         self._ephemeral_answer = None
         self._accessible_round = None
+        self._active_resolution_key = None
+        self._resolution_rounds.clear()
         self._dispatcher.observe_prompt(
             None,
             "closed",
@@ -794,6 +1328,56 @@ class AnimeTriviaAutomation:
                 )
         return records
 
+    def _semantic_reveal_records(self) -> list[tuple[str, str, str, int]]:
+        """Read official loaded bot answers directly from Discord accessibility."""
+
+        foreground_guard = getattr(self, "_foreground_guard", None)
+        question_locator = getattr(self, "_question_locator", None)
+        if foreground_guard is None or question_locator is None:
+            return []
+        window = foreground_guard.expected_window()
+        if window is None:
+            return []
+        try:
+            raw_records = question_locator.find_reveal_records(
+                window.hwnd, window.process_id
+            )
+        except Exception:
+            LOGGER.debug("Discord semantic reveal read failed", exc_info=True)
+            return []
+        records: list[tuple[str, str, str, int]] = []
+        for raw_record in raw_records:
+            answer = sanitize_answer(
+                raw_record.answer,
+                self._config.typing.max_answer_characters,
+            )
+            normalized = normalize_question(answer or "")
+            if answer is not None and normalized:
+                records.append(
+                    (
+                        normalized,
+                        answer,
+                        raw_record.identity,
+                        raw_record.screen_top,
+                    )
+                )
+        return records
+
+    @staticmethod
+    def _select_new_semantic_answers(
+        pending: PendingRound,
+        records: list[tuple[str, str, str, int]],
+        card_screen_bottom: int,
+    ) -> dict[str, str]:
+        """Select only newly appended official results below the tracked card."""
+
+        return {
+            normalized: answer
+            for normalized, answer, identity, screen_top in records
+            if identity not in pending.baseline_reveal_ids
+            and card_screen_bottom < screen_top <= card_screen_bottom + 900
+        }
+
     def _arm_pending_round(
         self, observation: PromptObservation, full_scene: Scene
     ) -> None:
@@ -825,6 +1409,8 @@ class AnimeTriviaAutomation:
                 normalized
                 for normalized, _answer, _top, _left in self._reveal_records(full_spans)
             )
+            semantic_baseline = self._semantic_reveal_records()
+            baseline.update(normalized for normalized, *_rest in semantic_baseline)
             self._pending_round = PendingRound(
                 signature=observation.signature,
                 question_label=observation.question_label,
@@ -838,6 +1424,9 @@ class AnimeTriviaAutomation:
                     else set()
                 ),
                 baseline_reveals=baseline,
+                baseline_reveal_ids={
+                    identity for _normalized, _answer, identity, _top in semantic_baseline
+                },
                 saw_ready=observation.readiness == "ready",
             )
             LOGGER.info(
@@ -867,75 +1456,101 @@ class AnimeTriviaAutomation:
         ):
             return
 
-        semantic_continuity = False
+        current_accessible = None
         window = self._foreground_guard.expected_window()
-        if window is not None and pending.clue:
+        if window is not None:
             try:
-                current = self._question_locator.find_question(
+                current_accessible = self._question_locator.find_question(
                     window.hwnd, window.process_id
-                )
-                semantic_continuity = bool(
-                    current is not None
-                    and current.question_label == pending.question_label
-                    and current.expected_answer_type == pending.expected_answer_type
-                    and normalize_accessible_clue(current.clue)
-                    == normalize_accessible_clue(pending.clue)
                 )
             except Exception:
                 LOGGER.debug("Closed-card semantic continuity failed", exc_info=True)
 
-        if pending.prompt_kind == "visual" and not semantic_continuity:
-            if observation.perceptual_hash is None or not pending.hashes:
-                return
-            try:
-                import imagehash
-
-                closed_hash = imagehash.hex_to_hash(observation.perceptual_hash)
-                nearest_locked_distance = min(
-                    int(closed_hash - imagehash.hex_to_hash(hash_text))
-                    for hash_text in pending.hashes
-                )
-            except (ImportError, ValueError):
-                LOGGER.exception("Could not compare the closed visual clue hash")
-                return
-            if nearest_locked_distance > self._config.matching.phash_max_distance:
-                LOGGER.warning(
-                    "Closed visual crop does not match its locked clue (distance=%d)",
-                    nearest_locked_distance,
-                )
-                return
-        elif pending.prompt_kind == "text" and not semantic_continuity:
-            from rapidfuzz import fuzz
-
-            continuity_score = fuzz.WRatio(
-                normalize_question(pending.clue),
-                normalize_question(observation.hint_text),
+        semantic_records = self._semantic_reveal_records()
+        semantic_new_answers: dict[str, str] = {}
+        if (
+            current_accessible is not None
+            and current_accessible.question_label == pending.question_label
+            and current_accessible.expected_answer_type
+            == pending.expected_answer_type
+        ):
+            semantic_new_answers = self._select_new_semantic_answers(
+                pending,
+                semantic_records,
+                current_accessible.screen_bottom,
             )
-            if continuity_score < self._config.matching.text_score_threshold:
-                return
-
-        records = self._reveal_records(spans)
-        current_counts = Counter(
-            normalized for normalized, _answer, _top, _left in records
-        )
-        card_left, _card_top, card_right, card_bottom = observation.card_box
-        new_answers: dict[str, str] = {}
-        for normalized, answer, top, left in records:
-            if not card_bottom < top <= card_bottom + 900:
-                continue
-            if not card_left - 160 <= left <= card_right + 160:
-                continue
-            if current_counts[normalized] <= pending.baseline_reveals[normalized]:
-                continue
-            new_answers[normalized] = answer
-        if len(new_answers) != 1:
+        if len(semantic_new_answers) > 1:
             LOGGER.debug(
-                "Visual reveal transaction still waiting: %d eligible answer(s)",
-                len(new_answers),
+                "Semantic reveal transaction is ambiguous: %d new answers",
+                len(semantic_new_answers),
             )
             return
 
-        answer = next(iter(new_answers.values()))
+        if len(semantic_new_answers) == 1:
+            # The bot's semantic result is stronger continuity evidence than a
+            # closed-card pHash. This is the primary visual-learning path.
+            answer = next(iter(semantic_new_answers.values()))
+        else:
+            semantic_continuity = bool(
+                current_accessible is not None
+                and current_accessible.question_label == pending.question_label
+                and current_accessible.expected_answer_type
+                == pending.expected_answer_type
+                and normalize_accessible_clue(current_accessible.clue)
+                == normalize_accessible_clue(pending.clue)
+            )
+
+            if pending.prompt_kind == "visual" and not semantic_continuity:
+                if observation.perceptual_hash is None or not pending.hashes:
+                    return
+                try:
+                    import imagehash
+
+                    closed_hash = imagehash.hex_to_hash(observation.perceptual_hash)
+                    nearest_locked_distance = min(
+                        int(closed_hash - imagehash.hex_to_hash(hash_text))
+                        for hash_text in pending.hashes
+                    )
+                except (ImportError, ValueError):
+                    LOGGER.exception("Could not compare the closed visual clue hash")
+                    return
+                if nearest_locked_distance > self._config.matching.phash_max_distance:
+                    LOGGER.warning(
+                        "Closed visual crop does not match its locked clue (distance=%d)",
+                        nearest_locked_distance,
+                    )
+                    return
+            elif pending.prompt_kind == "text" and not semantic_continuity:
+                from rapidfuzz import fuzz
+
+                continuity_score = fuzz.WRatio(
+                    normalize_question(pending.clue),
+                    normalize_question(observation.hint_text),
+                )
+                if continuity_score < self._config.matching.text_score_threshold:
+                    return
+
+            records = self._reveal_records(spans)
+            current_counts = Counter(
+                normalized for normalized, _answer, _top, _left in records
+            )
+            card_left, _card_top, card_right, card_bottom = observation.card_box
+            new_answers: dict[str, str] = {}
+            for normalized, candidate_answer, top, left in records:
+                if not card_bottom < top <= card_bottom + 900:
+                    continue
+                if not card_left - 160 <= left <= card_right + 160:
+                    continue
+                if current_counts[normalized] <= pending.baseline_reveals[normalized]:
+                    continue
+                new_answers[normalized] = candidate_answer
+            if len(new_answers) != 1:
+                LOGGER.debug(
+                    "OCR reveal transaction still waiting: %d eligible answer(s)",
+                    len(new_answers),
+                )
+                return
+            answer = next(iter(new_answers.values()))
         try:
             if pending.clue:
                 self._cache.add_semantic(
@@ -1004,7 +1619,7 @@ class AnimeTriviaAutomation:
 
     def run(self) -> None:
         LOGGER.info(
-            "Starting Anime Trivia Automation%s. Gemini may stay foreground while answers resolve; return to the empty Anime Soul composer before the round closes. Press %s to stop.",
+            "Starting Anime Trivia Automation%s with Gemini 3.7 and local Qwen. Keep Anime Soul visible; manual research remains a fallback. Press %s to stop.",
             " in DRY RUN mode" if not self._config.typing.enabled else "",
             self._config.typing.stop_key.upper(),
         )
@@ -1024,6 +1639,27 @@ class AnimeTriviaAutomation:
                 raise RuntimeError(
                     "Qwen3.8 novel solver failed startup preflight: "
                     f"{self._novel.last_detail}"
+                )
+        if self._config.gemini.enabled:
+            self._start_gemini_event_loop()
+            self._status.emit(
+                "LOADING",
+                title="Checking Gemini API solver",
+                detail="Verifying credentials and Gemini 3.7 Flash availability",
+                readiness="unknown",
+            )
+            availability = self._run_gemini_coroutine(
+                self._gemini.preflight(),
+                timeout=float(self._config.gemini.preflight_timeout_seconds) + 1.0,
+            )
+            if not availability.available:
+                LOGGER.warning("Gemini resolver unavailable: %s", availability.detail)
+                self._status.emit(
+                    "ATTENTION",
+                    title="Gemini unavailable — local solver remains active",
+                    detail=availability.detail,
+                    readiness="unknown",
+                    event_id="gemini-unavailable",
                 )
 
         self._dispatcher.start()
@@ -1049,6 +1685,7 @@ class AnimeTriviaAutomation:
             self.stop()
             self._capture.join()
             self._processor_thread.join(timeout=5.0)
+            self._shutdown_resolution_workers()
             self._dispatcher.join(timeout=5.0)
             LOGGER.info("Anime Trivia Automation stopped")
 
@@ -1066,11 +1703,34 @@ class AnimeTriviaAutomation:
             event_id="stopping",
         )
         self._capture.request_stop()
-        self._novel.close()
         try:
             self._emergency_stop.stop()
         except RuntimeError:
             LOGGER.debug("Emergency-stop listener was already stopped", exc_info=True)
+
+    def _shutdown_resolution_workers(self) -> None:
+        with self._resolution_shutdown_lock:
+            if self._resolution_shutdown:
+                return
+            self._resolution_shutdown = True
+        self._resolution_executor.shutdown(wait=True, cancel_futures=True)
+        self._novel.close()
+        loop = self._gemini_loop
+        thread = self._gemini_loop_thread
+        if loop is not None and loop.is_running():
+            try:
+                self._run_gemini_coroutine(
+                    self._gemini.close(),
+                    timeout=3.0,
+                    cancel_on_stop=False,
+                )
+            except Exception:
+                LOGGER.debug("Gemini resolver close failed", exc_info=True)
+            loop.call_soon_threadsafe(loop.stop)
+        if thread is not None:
+            thread.join(timeout=5.0)
+        self._gemini_loop = None
+        self._gemini_loop_thread = None
 
 
 def inspect_image(

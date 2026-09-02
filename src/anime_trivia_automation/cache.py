@@ -275,20 +275,20 @@ class TriviaCache:
             expected_answer_type,
             normalize_accessible_clue(clue),
         )
+        answer = self._history_exact.get(exact_key)
+        if answer is not None:
+            return CacheHit(
+                kind="history",
+                key=exact_key[1],
+                answer=answer,
+                score=100.0,
+            )
         runtime = self._semantic_index.get(exact_key)
         if runtime is not None:
             stored_key, answer = runtime
             return CacheHit(
                 kind="history",
                 key=stored_key,
-                answer=answer,
-                score=100.0,
-            )
-        answer = self._history_exact.get(exact_key)
-        if answer is not None:
-            return CacheHit(
-                kind="history",
-                key=exact_key[1],
                 answer=answer,
                 score=100.0,
             )

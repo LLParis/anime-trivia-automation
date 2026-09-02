@@ -37,6 +37,11 @@ class DiscordComposer:
     def set_focus(self) -> None:
         self.element.SetFocus()
 
+    def set_owned_value(self, value: str) -> None:
+        """Replace the empty editor with one complete automation-owned value."""
+
+        self.value_pattern.SetValue(value)
+
     def clear_owned_value(self) -> None:
         self.value_pattern.SetValue("")
 
@@ -124,6 +129,14 @@ class AccessibleQuestion:
     clue: str
     expected_answer_type: str
     question_label: str
+    screen_bottom: int
+
+
+@dataclass(frozen=True)
+class AccessibleReveal:
+    identity: str
+    answer: str
+    screen_top: int
 
 
 class DiscordQuestionLocator(DiscordComposerLocator):
@@ -134,6 +147,10 @@ class DiscordQuestionLocator(DiscordComposerLocator):
         r"(?:Get Ready(?:(?:\.\.\.)|…)?|Answer Now!?|Round Over)\s+"
         r"(.+?)\s*,?\s*🎯\s*Answer with the "
         r"(anime title|character name).*?Question\s*(\d+)\s*/\s*(\d+)",
+        flags=re.IGNORECASE,
+    )
+    _REVEAL_PATTERN = re.compile(
+        r"\bthe answer was\s+(.+?)(?:\.\s*(?:\+\d+\s+AS\s+Points|$)|$)",
         flags=re.IGNORECASE,
     )
 
@@ -169,9 +186,12 @@ class DiscordQuestionLocator(DiscordComposerLocator):
                 else "character"
             )
             try:
-                screen_top = int(element.CurrentBoundingRectangle.top)
+                rectangle = element.CurrentBoundingRectangle
+                screen_top = int(rectangle.top)
+                screen_bottom = int(rectangle.bottom)
             except Exception:
                 screen_top = index
+                screen_bottom = index
             parsed.append(
                 (
                     screen_top,
@@ -180,7 +200,76 @@ class DiscordQuestionLocator(DiscordComposerLocator):
                     clue=match.group(1).strip(),
                     expected_answer_type=expected_type,
                     question_label=f"{match.group(3)}/{match.group(4)}",
+                    screen_bottom=screen_bottom,
                     ),
                 )
             )
         return max(parsed, key=lambda item: (item[0], item[1]))[2] if parsed else None
+
+    @classmethod
+    def parse_reveal_answer(cls, accessible_name: str) -> str | None:
+        """Extract one official Anime Soul answer from a semantic list-item name."""
+
+        match = cls._REVEAL_PATTERN.search(accessible_name)
+        if match is None:
+            return None
+        answer = " ".join(match.group(1).split()).strip()
+        return answer or None
+
+    @classmethod
+    def is_official_reveal_name(cls, accessible_name: str) -> bool:
+        folded = accessible_name.casefold()
+        return (
+            re.match(
+                r"^Anime Soul\d{1,2}:\d{2}\s*(?:AM|PM)",
+                accessible_name,
+            )
+            is not None
+            and ("correct!" in folded or "time's up" in folded)
+            and cls.parse_reveal_answer(accessible_name) is not None
+        )
+
+    def find_reveal_records(
+        self, hwnd: int, process_id: int
+    ) -> tuple[AccessibleReveal, ...]:
+        """Read visible official bot reveals with stable identity and position."""
+
+        automation, uia_types = self._client()
+        root = automation.ElementFromHandle(hwnd)
+        condition = automation.CreatePropertyCondition(
+            uia_types.UIA_ControlTypePropertyId,
+            uia_types.UIA_ListItemControlTypeId,
+        )
+        elements = root.FindAll(uia_types.TreeScope_Descendants, condition)
+        records: list[AccessibleReveal] = []
+        for index in range(elements.Length):
+            element = elements.GetElement(index)
+            if int(element.CurrentProcessId) != process_id:
+                continue
+            if bool(element.CurrentIsOffscreen):
+                continue
+            name = str(element.CurrentName or "")
+            if not self.is_official_reveal_name(name):
+                continue
+            answer = self.parse_reveal_answer(name)
+            if answer is not None:
+                try:
+                    screen_top = int(element.CurrentBoundingRectangle.top)
+                except Exception:
+                    screen_top = index
+                records.append(
+                    AccessibleReveal(
+                        identity=name,
+                        answer=answer,
+                        screen_top=screen_top,
+                    )
+                )
+        return tuple(records)
+
+    def find_reveal_answers(self, hwnd: int, process_id: int) -> tuple[str, ...]:
+        """Compatibility projection of visible official reveal answers."""
+
+        return tuple(
+            record.answer
+            for record in self.find_reveal_records(hwnd, process_id)
+        )

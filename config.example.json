@@ -118,6 +118,22 @@
     "answer_catalog_path": "data/answer_catalog.seed.json",
     "knowledge_index_path": "data/anime_knowledge.sqlite"
   },
+  "gemini": {
+    "enabled": true,
+    "api_key_env": "GEMINI_API_KEY",
+    "primary_model": "gemini-3.7-flash",
+    "primary_thinking_level": "low",
+    "scout_enabled": false,
+    "scout_model": "gemini-3.5-flash-lite",
+    "scout_thinking_level": "minimal",
+    "preflight_timeout_seconds": 12.0,
+    "total_timeout_seconds": 30.0,
+    "text_timeout_seconds": 10.0,
+    "min_confidence": 0.9,
+    "max_answer_characters": 96,
+    "max_clue_characters": 2000,
+    "max_image_bytes": 4000000
+  },
   "typing": {
     "enabled": true,
     "expected_process_names": ["Discord.exe"],

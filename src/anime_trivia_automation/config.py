@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -190,6 +191,26 @@ class NovelConfig:
 
 
 @dataclass(frozen=True)
+class GeminiConfig:
+    """Bounded, ungrounded Gemini resolver for novel text and visual clues."""
+
+    enabled: bool = True
+    api_key_env: str = "GEMINI_API_KEY"
+    primary_model: str = "gemini-3.7-flash"
+    primary_thinking_level: str = "low"
+    scout_enabled: bool = False
+    scout_model: str = "gemini-3.5-flash-lite"
+    scout_thinking_level: str = "minimal"
+    preflight_timeout_seconds: float = 12.0
+    total_timeout_seconds: float = 30.0
+    text_timeout_seconds: float = 10.0
+    min_confidence: float = 0.90
+    max_answer_characters: int = 96
+    max_clue_characters: int = 2000
+    max_image_bytes: int = 4_000_000
+
+
+@dataclass(frozen=True)
 class TypingConfig:
     enabled: bool = True
     expected_process_names: tuple[str, ...] = ("Discord.exe",)
@@ -249,6 +270,7 @@ class AppConfig:
     matching: MatchConfig = field(default_factory=MatchConfig)
     vlm: VlmConfig = field(default_factory=VlmConfig)
     novel: NovelConfig = field(default_factory=NovelConfig)
+    gemini: GeminiConfig = field(default_factory=GeminiConfig)
     typing: TypingConfig = field(default_factory=TypingConfig)
     status: StatusConfig = field(default_factory=StatusConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -269,6 +291,7 @@ def load_config(path: str | Path) -> AppConfig:
     match_raw = _section(raw, "matching")
     vlm_raw = _section(raw, "vlm")
     novel_raw = _section(raw, "novel")
+    gemini_raw = _section(raw, "gemini")
     typing_raw = _section(raw, "typing")
     status_raw = _section(raw, "status")
     runtime_raw = _section(raw, "runtime")
@@ -552,6 +575,39 @@ def load_config(path: str | Path) -> AppConfig:
         ),
     )
 
+    gemini = GeminiConfig(
+        enabled=bool(gemini_raw.get("enabled", True)),
+        api_key_env=str(gemini_raw.get("api_key_env", "GEMINI_API_KEY")),
+        primary_model=str(
+            gemini_raw.get("primary_model", "gemini-3.7-flash")
+        ),
+        primary_thinking_level=str(
+            gemini_raw.get("primary_thinking_level", "low")
+        ).casefold(),
+        scout_enabled=bool(gemini_raw.get("scout_enabled", False)),
+        scout_model=str(
+            gemini_raw.get("scout_model", "gemini-3.5-flash-lite")
+        ),
+        scout_thinking_level=str(
+            gemini_raw.get("scout_thinking_level", "minimal")
+        ).casefold(),
+        preflight_timeout_seconds=float(
+            gemini_raw.get("preflight_timeout_seconds", 12.0)
+        ),
+        total_timeout_seconds=float(
+            gemini_raw.get("total_timeout_seconds", 30.0)
+        ),
+        text_timeout_seconds=float(
+            gemini_raw.get("text_timeout_seconds", 10.0)
+        ),
+        min_confidence=float(gemini_raw.get("min_confidence", 0.90)),
+        max_answer_characters=int(
+            gemini_raw.get("max_answer_characters", 96)
+        ),
+        max_clue_characters=int(gemini_raw.get("max_clue_characters", 2000)),
+        max_image_bytes=int(gemini_raw.get("max_image_bytes", 4_000_000)),
+    )
+
     seed_cache_value = runtime_raw.get("seed_cache_path", "data/trivia_cache.seed.json")
     history_value = runtime_raw.get("history_path", "data/trivia_history.seed.json")
     runtime = RuntimeConfig(
@@ -584,6 +640,7 @@ def load_config(path: str | Path) -> AppConfig:
         matching=matching,
         vlm=vlm,
         novel=novel,
+        gemini=gemini,
         typing=typing,
         status=status,
         runtime=runtime,
@@ -798,6 +855,47 @@ def validate_config(config: AppConfig) -> None:
             raise ValueError("novel timeout values must be positive")
         if config.novel.total_timeout_seconds > 10.0:
             raise ValueError("novel.total_timeout_seconds cannot exceed 10 seconds")
+    if config.gemini.enabled:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", config.gemini.api_key_env):
+            raise ValueError("gemini.api_key_env must be an environment variable name")
+        if config.gemini.primary_model != "gemini-3.7-flash":
+            raise ValueError("gemini.primary_model must be 'gemini-3.7-flash'")
+        if config.gemini.primary_thinking_level != "low":
+            raise ValueError("gemini.primary_thinking_level must be 'low'")
+        if config.gemini.scout_model != "gemini-3.5-flash-lite":
+            raise ValueError(
+                "gemini.scout_model must be 'gemini-3.5-flash-lite'"
+            )
+        if config.gemini.scout_thinking_level != "minimal":
+            raise ValueError("gemini.scout_thinking_level must be 'minimal'")
+        if not 0.0 <= config.gemini.min_confidence <= 1.0:
+            raise ValueError("gemini.min_confidence must be between 0 and 1")
+        if min(
+            config.gemini.preflight_timeout_seconds,
+            config.gemini.total_timeout_seconds,
+            config.gemini.text_timeout_seconds,
+        ) <= 0:
+            raise ValueError("gemini timeout values must be positive")
+        if config.gemini.total_timeout_seconds > 30.0:
+            raise ValueError("gemini.total_timeout_seconds cannot exceed 30 seconds")
+        if config.gemini.text_timeout_seconds > config.gemini.total_timeout_seconds:
+            raise ValueError(
+                "gemini.text_timeout_seconds cannot exceed total_timeout_seconds"
+            )
+        if config.gemini.preflight_timeout_seconds > 15.0:
+            raise ValueError(
+                "gemini.preflight_timeout_seconds cannot exceed 15 seconds"
+            )
+        if not 1 <= config.gemini.max_answer_characters <= 200:
+            raise ValueError("gemini.max_answer_characters must be between 1 and 200")
+        if not 32 <= config.gemini.max_clue_characters <= 10_000:
+            raise ValueError(
+                "gemini.max_clue_characters must be between 32 and 10000"
+            )
+        if not 1024 <= config.gemini.max_image_bytes <= 20_000_000:
+            raise ValueError(
+                "gemini.max_image_bytes must be between 1024 and 20000000"
+            )
     if config.typing.pre_delay_seconds[0] > config.typing.pre_delay_seconds[1]:
         raise ValueError("typing.pre_delay_seconds minimum exceeds maximum")
     if config.typing.pre_delay_seconds[0] < 0:

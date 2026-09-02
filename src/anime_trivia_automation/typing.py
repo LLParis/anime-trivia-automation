@@ -350,6 +350,15 @@ class ActivePromptState:
                 and self._readiness in {"locked", "ready"}
             )
 
+    def is_ready(self, signature: str, clue_fingerprint: str = "") -> bool:
+        with self._condition:
+            return (
+                self._signature == signature
+                and (not clue_fingerprint or self._clue_fingerprint == clue_fingerprint)
+                and not self._uncertain
+                and self._readiness == "ready"
+            )
+
     def execute_if_ready(
         self,
         signature: str,
@@ -378,26 +387,8 @@ class ActivePromptState:
             return self._signature
 
 
-def humanize_typing(
-    controller: Any,
-    text: str,
-    delays: list[float],
-    should_continue: Callable[[], bool],
-    on_character_typed: Callable[[], None] | None = None,
-) -> bool:
-    """Type one character at a time with a caller-generated human delay profile."""
-    for character, delay in zip(text, delays, strict=True):
-        if not should_continue():
-            return False
-        controller.type(character)
-        if on_character_typed is not None:
-            on_character_typed()
-        time.sleep(delay)
-    return True
-
-
 class SafeKeyboardExecutor:
-    """Own and verify one Discord draft, then press Enter only on green."""
+    """Atomically own one complete Discord answer and submit only on green."""
 
     def __init__(
         self,
@@ -565,27 +556,6 @@ class SafeKeyboardExecutor:
         if not self._clear_owned_draft(composer, expected_prefix):
             self._remember_orphan(expected_prefix)
 
-    def _still_open(
-        self,
-        signature: str,
-        clue_fingerprint: str = "",
-        *,
-        check_window: bool = True,
-    ) -> bool:
-        state_valid = self._active_prompt.wait_current_open(
-            signature,
-            self._stop_event,
-            clue_fingerprint=clue_fingerprint,
-        )
-        if not state_valid:
-            return False
-        if check_window:
-            allowed, reason = self._guard.allowed()
-            if not allowed:
-                LOGGER.warning("Typing aborted: %s", reason)
-                return False
-        return True
-
     def _wait_pre_delay(
         self,
         deadline: float,
@@ -593,12 +563,19 @@ class SafeKeyboardExecutor:
         window: ForegroundWindow,
         composer: DiscordComposer | None,
     ) -> str:
-        """Monitor manual ownership continuously before the first character."""
+        """Monitor manual ownership before the one atomic composer write."""
 
         while not self._stop_event.is_set():
-            if not self._active_prompt.is_open(
-                task.prompt_signature, task.clue_fingerprint
-            ):
+            prompt_valid = (
+                self._active_prompt.is_ready(
+                    task.prompt_signature, task.clue_fingerprint
+                )
+                if self._readiness_config.require_green_outline
+                else self._active_prompt.is_open(
+                    task.prompt_signature, task.clue_fingerprint
+                )
+            )
+            if not prompt_valid:
                 return "retry"
             current = self._guard.current()
             allowed, _reason = self._guard.validate(current)
@@ -672,12 +649,21 @@ class SafeKeyboardExecutor:
             # If another app covers the calibrated card, capture becomes
             # uncertain. Wait through that interval and require a fresh exact
             # signature/fingerprint observation before any composer access.
-            if not self._active_prompt.wait_current_open(
-                task.prompt_signature,
-                self._stop_event,
-                timeout=remaining,
-                clue_fingerprint=task.clue_fingerprint,
-            ):
+            if self._readiness_config.require_green_outline:
+                state_valid = self._active_prompt.wait_current_ready(
+                    task.prompt_signature,
+                    self._stop_event,
+                    timeout=remaining,
+                    clue_fingerprint=task.clue_fingerprint,
+                )
+            else:
+                state_valid = self._active_prompt.wait_current_open(
+                    task.prompt_signature,
+                    self._stop_event,
+                    timeout=remaining,
+                    clue_fingerprint=task.clue_fingerprint,
+                )
+            if not state_valid:
                 if (
                     not self._stop_event.is_set()
                     and time.monotonic() >= deadline
@@ -713,12 +699,21 @@ class SafeKeyboardExecutor:
                         if composer is not None:
                             # Recheck both logical identity and the exact HWND after
                             # UIA lookup/focus, before the first possible key.
-                            if not self._active_prompt.wait_current_open(
-                                task.prompt_signature,
-                                self._stop_event,
-                                timeout=min(remaining, 1.0),
-                                clue_fingerprint=task.clue_fingerprint,
-                            ):
+                            if self._readiness_config.require_green_outline:
+                                state_valid = self._active_prompt.wait_current_ready(
+                                    task.prompt_signature,
+                                    self._stop_event,
+                                    timeout=min(remaining, 1.0),
+                                    clue_fingerprint=task.clue_fingerprint,
+                                )
+                            else:
+                                state_valid = self._active_prompt.wait_current_open(
+                                    task.prompt_signature,
+                                    self._stop_event,
+                                    timeout=min(remaining, 1.0),
+                                    clue_fingerprint=task.clue_fingerprint,
+                                )
+                            if not state_valid:
                                 return None, None, False
                             current = self._guard.current()
                             current_allowed, _current_reason = self._guard.validate(
@@ -758,6 +753,110 @@ class SafeKeyboardExecutor:
                 return None, None, False
         return None, None, False
 
+    def _commit_complete_answer(
+        self,
+        task: AnswerTask,
+        answer: str,
+        window: ForegroundWindow,
+        composer: DiscordComposer | None,
+    ) -> str:
+        """Atomically place a complete answer while the exact prompt is green.
+
+        Returns ``committed``, ``manual``, ``retry``, ``ambiguous``, or ``stale``.
+        No character-at-a-time prefix is ever written.
+        """
+
+        outcome = "stale"
+
+        def commit_if_owned() -> bool:
+            nonlocal outcome
+            current_window = self._guard.current()
+            allowed, reason = self._guard.validate(current_window)
+            if (
+                not allowed
+                or current_window is None
+                or current_window.hwnd != window.hwnd
+            ):
+                LOGGER.info("Atomic commit deferred: %s", reason)
+                outcome = "retry"
+                return False
+            if composer is None:
+                LOGGER.warning("Atomic commit requires a verified Discord composer")
+                outcome = "ambiguous"
+                return False
+            try:
+                current_value = composer.value()
+                if current_value != "":
+                    outcome = "manual"
+                    return False
+                if not composer.focused():
+                    outcome = "retry"
+                    return False
+            except Exception:
+                LOGGER.debug(
+                    "Discord composer rerendered before atomic commit",
+                    exc_info=True,
+                )
+                outcome = "retry"
+                return False
+
+            try:
+                composer.set_owned_value(answer)
+            except Exception:
+                LOGGER.warning(
+                    "Atomic composer write raised; verifying the complete value",
+                    exc_info=True,
+                )
+                try:
+                    current_value = composer.value()
+                except Exception:
+                    self._remember_orphan(answer)
+                    outcome = "ambiguous"
+                    return False
+                if current_value == answer:
+                    LOGGER.info("Atomic composer write was verified after an exception")
+                    outcome = "committed"
+                    return True
+                if current_value == "":
+                    outcome = "ambiguous"
+                    return False
+                outcome = "manual"
+                return False
+
+            try:
+                current_value = composer.value()
+            except Exception:
+                LOGGER.warning(
+                    "Could not verify the complete atomic composer value",
+                    exc_info=True,
+                )
+                self._remember_orphan(answer)
+                outcome = "ambiguous"
+                return False
+            if current_value == answer:
+                outcome = "committed"
+                return True
+            if current_value == "":
+                outcome = "retry"
+                return False
+            outcome = "manual"
+            return False
+
+        if self._readiness_config.require_green_outline:
+            committed = self._active_prompt.execute_if_ready(
+                task.prompt_signature,
+                self._stop_event,
+                commit_if_owned,
+                clue_fingerprint=task.clue_fingerprint,
+            )
+        elif self._active_prompt.is_open(
+            task.prompt_signature, task.clue_fingerprint
+        ):
+            committed = commit_if_owned()
+        else:
+            committed = False
+        return "committed" if committed else outcome
+
     def execute(self, task: AnswerTask) -> bool:
         event_token = task.round_token or task.prompt_signature
         if self.is_suppressed(task):
@@ -781,157 +880,14 @@ class SafeKeyboardExecutor:
             )
             return True
 
-        if (
-            self._readiness_config.require_green_outline
-            and not self._config.draft_while_locked
-        ):
-            if not self._active_prompt.wait_ready(
-                task.prompt_signature,
-                self._stop_event,
-                self._readiness_config.ready_wait_timeout_seconds,
-                clue_fingerprint=task.clue_fingerprint,
-            ):
-                LOGGER.warning("Green-outline gate timed out or the round changed")
-                return False
-
-        delays = [random.uniform(*self._config.key_delay_seconds) for _ in answer]
-        while not self._stop_event.is_set():
-            window, composer, manual_text_detected = self._wait_for_safe_composer(
-                task, answer, event_token
-            )
-            if window is None:
-                return False
-            if manual_text_detected:
-                self._mark_manual_round(task, answer, event_token)
-                return False
-
-            pre_delay = random.uniform(*self._config.pre_delay_seconds)
-            start_at = time.monotonic() + pre_delay
-            LOGGER.info(
-                "Humanized draft scheduled: answer=%r pre-delay=%.3fs type≈%.3fs",
-                answer,
-                pre_delay,
-                sum(delays),
-            )
-            pre_delay_result = self._wait_pre_delay(
-                start_at, task, window, composer
-            )
-            if pre_delay_result == "ready":
-                break
-            if pre_delay_result == "manual":
-                self._mark_manual_round(task, answer, event_token)
-                return False
-            if pre_delay_result == "stopped":
-                return False
-            LOGGER.info("Pre-delay lost safe ownership; returning to passive wait")
-        else:
-            return False
-
-        typed_characters = 0
-
-        def should_continue() -> bool:
-            if not self._still_open(
-                task.prompt_signature,
-                task.clue_fingerprint,
-                check_window=True,
-            ):
-                return False
-            if composer is None:
-                return True
-            try:
-                return (
-                    composer.focused()
-                    and composer.value() == answer[:typed_characters]
-                )
-            except Exception:
-                LOGGER.exception("Discord composer validation failed")
-                return False
-
-        def record_character() -> None:
-            nonlocal typed_characters
-            typed_characters += 1
-
-        if not should_continue():
-            if composer is not None:
-                try:
-                    manual_text_detected = composer.value() != ""
-                except Exception:
-                    self.suppress_task(
-                        task, "composer ownership became ambiguous before typing"
-                    )
-                    return False
-                if manual_text_detected:
-                    self._mark_manual_round(task, answer, event_token)
-            return False
-        self._status.emit(
-            "DRAFTING",
-            title=f"Drafting — {task.question_label or 'Question'}",
-            detail="Typing the verified answer during the red reading window",
-            question=task.question_label or "Question",
-            answer=answer,
-            source=task.source,
-            readiness="locked",
-            event_id=event_token,
-            increment="drafts_started",
-        )
-        try:
-            draft_completed = humanize_typing(
-                self._controller,
-                answer,
-                delays,
-                should_continue,
-                on_character_typed=record_character,
-            )
-        except Exception:
-            LOGGER.warning(
-                "Character injection outcome is ambiguous; Enter is blocked",
-                exc_info=True,
-            )
-            if composer is not None:
-                try:
-                    current = composer.value()
-                except Exception:
-                    current = ""
-                if current and answer.startswith(current):
-                    self._remember_orphan(current)
-            self._status.emit(
-                "ATTENTION",
-                title="Draft interrupted",
-                detail="Character input was ambiguous; Enter is blocked",
-                question=task.question_label or "Question",
-                answer=answer,
-                source=task.source,
-                event_id=f"{event_token}:character-ambiguous",
-            )
-            self.suppress_task(task, "character injection became ambiguous")
-            return False
-        if not draft_completed:
-            LOGGER.info("Draft canceled while typing")
-            self._clear_or_remember(composer, answer[:typed_characters])
-            self.suppress_task(task, "focus or composer ownership changed mid-draft")
-            return False
-        if composer is not None:
-            try:
-                complete_draft = composer.value() == answer
-            except Exception:
-                LOGGER.warning(
-                    "Could not verify the completed Discord draft",
-                    exc_info=True,
-                )
-                self._remember_orphan(answer)
-                return False
-            if not complete_draft:
-                LOGGER.warning("Composer did not contain the exact completed macro draft")
-                self._clear_or_remember(composer, answer[:typed_characters])
-                self.suppress_task(task, "completed composer content diverged")
-                return False
-
         if self._readiness_config.require_green_outline:
-            LOGGER.info("Draft complete; waiting for green outline before Enter")
+            LOGGER.info(
+                "Answer held in memory; Discord remains untouched until green"
+            )
             self._status.emit(
                 "WAITING_GREEN",
-                title=f"Draft ready — {task.question_label or 'Question'}",
-                detail="Answer is complete; Enter remains blocked until green",
+                title=f"Answer ready — {task.question_label or 'Question'}",
+                detail="Held in memory; Discord stays untouched until answers open",
                 question=task.question_label or "Question",
                 answer=answer,
                 source=task.source,
@@ -945,13 +901,81 @@ class SafeKeyboardExecutor:
                 clue_fingerprint=task.clue_fingerprint,
             ):
                 LOGGER.warning("Green-outline gate timed out or the round changed")
-                self._clear_or_remember(composer, answer)
                 return False
-            if self._stop_event.wait(
-                self._config.enter_after_open_slack_seconds
-            ):
-                self._clear_or_remember(composer, answer)
+
+        composer: DiscordComposer | None = None
+        while not self._stop_event.is_set():
+            window, composer, manual_text_detected = self._wait_for_safe_composer(
+                task, answer, event_token
+            )
+            if window is None:
                 return False
+            if manual_text_detected:
+                self._mark_manual_round(task, answer, event_token)
+                return False
+
+            pre_delay = random.uniform(*self._config.pre_delay_seconds)
+            start_at = time.monotonic() + pre_delay
+            LOGGER.info(
+                "Atomic answer commit scheduled: answer=%r pre-delay=%.3fs",
+                answer,
+                pre_delay,
+            )
+            pre_delay_result = self._wait_pre_delay(
+                start_at, task, window, composer
+            )
+            if pre_delay_result == "ready":
+                commit_result = self._commit_complete_answer(
+                    task, answer, window, composer
+                )
+                if commit_result == "committed":
+                    break
+                if commit_result == "manual":
+                    self._mark_manual_round(task, answer, event_token)
+                    return False
+                if commit_result == "ambiguous":
+                    self._status.emit(
+                        "ATTENTION",
+                        title="Atomic answer not verified",
+                        detail="Enter is blocked; no partial typing was attempted",
+                        question=task.question_label or "Question",
+                        answer=answer,
+                        source=task.source,
+                        event_id=f"{event_token}:atomic-ambiguous",
+                    )
+                    self.suppress_task(task, "atomic composer write was ambiguous")
+                    return False
+                if commit_result == "stale":
+                    LOGGER.info("Atomic commit canceled because the round changed")
+                    return False
+                LOGGER.info(
+                    "Atomic commit lost safe ownership; returning to passive wait"
+                )
+                continue
+            if pre_delay_result == "manual":
+                self._mark_manual_round(task, answer, event_token)
+                return False
+            if pre_delay_result == "stopped":
+                return False
+            LOGGER.info("Pre-delay lost safe ownership; returning to passive wait")
+        else:
+            return False
+
+        self._status.emit(
+            "DRAFTING",
+            title=f"Complete answer staged — {task.question_label or 'Question'}",
+            detail="Committed atomically after green; verifying before Enter",
+            question=task.question_label or "Question",
+            answer=answer,
+            source=task.source,
+            readiness="ready",
+            event_id=event_token,
+            increment="drafts_started",
+        )
+        LOGGER.info("Complete answer committed atomically after green")
+        if self._stop_event.wait(self._config.enter_after_open_slack_seconds):
+            self._clear_or_remember(composer, answer)
+            return False
 
         def dispatch_enter_if_owned() -> bool:
             window = self._guard.current()
@@ -1055,15 +1079,15 @@ class SafeKeyboardExecutor:
                 )
                 return True
         LOGGER.info(
-            "Discord composer accepted [%s] %s -> %s",
+            "Enter dispatched and composer cleared [%s] %s -> %s",
             task.source,
             task.question_label or "?",
             answer,
         )
         self._status.emit(
             "SUBMITTED",
-            title=f"Submitted — {task.question_label or 'Question'}",
-            detail="Discord cleared the composer after Enter",
+            title=f"Enter sent — {task.question_label or 'Question'}",
+            detail="Composer cleared; bot acceptance is confirmed only by its reveal",
             question=task.question_label or "Question",
             answer=answer,
             source=task.source,

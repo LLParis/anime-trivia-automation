@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source": "Available Anime Soul question cards paired with dated bot reveals or accepted live submissions; unverified manual search answers are excluded",
-  "captured_utc": "2026-09-01T19:15:00Z",
+  "captured_utc": "2026-09-02T01:05:00Z",
   "pairs": [
     {"clue": "\"Sometimes living can be hard, but it's only because we're alive that we can make each other laugh, cry, and be happy.\"", "type": "anime_title", "answer": "Fruits Basket"},
     {"clue": "🏍️ 💊 🏙️ 💥", "type": "anime_title", "answer": "Akira"},
@@ -140,6 +140,16 @@
     {"clue": "\"Nothing happened.\"", "type": "anime_title", "answer": "One Piece", "verification": "bot-reveal-transcript"},
     {"clue": "A fashionable art student also known as Yuka who encourages a new painter to take art seriously.", "type": "character", "answer": "Ryuji Ayukawa", "verification": "bot-reveal-transcript"},
     {"clue": "\"Those who break the rules are scum, but those who abandon their friends are worse than scum.\"", "type": "anime_title", "answer": "Naruto", "verification": "bot-reveal-transcript"},
-    {"clue": "A former government Enforcer with messy dark hair who relentlessly pursues criminals despite his complicated relationship with the system.", "type": "character", "answer": "Shinya Kogami", "verification": "bot-reveal-transcript"}
+    {"clue": "A former government Enforcer with messy dark hair who relentlessly pursues criminals despite his complicated relationship with the system.", "type": "character", "answer": "Shinya Kogami", "verification": "bot-reveal-transcript"},
+    {"clue": "\"Who decides limits? And based on what?\"", "type": "anime_title", "answer": "One-Punch Man", "verification": "bot-reveal-transcript-2026-09-01-18"},
+    {"clue": "A soft-spoken student with blue hair whose talent for observation makes him particularly suited to assassination.", "type": "character", "answer": "Nagisa Shiota", "verification": "bot-reveal-transcript-2026-09-01-18"},
+    {"clue": "A quiet gray wolf who struggles with his instincts while attending a school shared by herbivores and carnivores.", "type": "character", "answer": "Legoshi", "verification": "bot-reveal-transcript-2026-09-01-18"},
+    {"clue": "\"A sword is a weapon. The art of swordsmanship is learning how to kill.\"", "type": "anime_title", "answer": "Rurouni Kenshin", "verification": "bot-reveal-transcript-2026-09-01-18"},
+    {"clue": "An ice-magic user who frequently loses his clothes and maintains a fierce rivalry with his fire-breathing teammate.", "type": "character", "answer": "Gray Fullbuster", "verification": "bot-reveal-transcript-2026-09-01-18"},
+    {"clue": "A blond teenager who dreams of becoming a Gang-Star and wears a suit decorated with ladybug-shaped ornaments.", "type": "character", "answer": "Giorno Giovanna", "verification": "bot-reveal-transcript-2026-09-01-18"},
+    {"clue": "A hardworking high-school student who meets an older manga artist at a pizza restaurant and offers him steady encouragement.", "type": "character", "answer": "Airi Katagiri", "verification": "bot-reveal-transcript-2026-09-01-18"},
+    {"clue": "Anya's wealthy and outspoken classmate who quickly declares herself Anya's best friend.", "type": "character", "answer": "Becky Blackbell", "verification": "bot-reveal-transcript-2026-09-01-18"},
+    {"clue": "\"In the name of the Moon, I'll punish you!\"", "type": "anime_title", "answer": "Sailor Moon", "verification": "bot-reveal-transcript-2026-09-01-18"},
+    {"clue": "🏆 ⚔️ 🪄 👑", "type": "anime_title", "answer": "Fate Zero", "verification": "bot-reveal-transcript-2026-09-01-18"}
   ]
 }
