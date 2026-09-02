@@ -29,6 +29,7 @@ DXcam 60 FPS physical-pixel crop
 - Semantic clue and reveal reads can now inspect the one unambiguous Discord window in the background without activating, focusing, or typing into it.
 - Novel Gemini/Qwen work runs outside the scene thread, so OCR continues to process readiness changes while models work.
 - Gemini 3.7 Flash is preflighted at startup, uses low thinking and strict structured output, performs no live retry or Search grounding, and fails closed without delaying local Qwen.
+- Proof boundary for v0.8.0: real Gemini text generation is verified, while the replayed Q10 inline-image request was accepted by the provider path but Google returned a free-tier `RateLimitError`; live multimodal answer accuracy remains unproven until quota resets, and that lane fails closed meanwhile.
 - Replaced raw model guessing with retrieval-grounded Qwen3.8. Raw Qwen confidently missed several September 1 character clues; evidence retrieval plus verification resolved the five novel clues not promoted into history as Yuki Sohma, Dragon Ball Z, Akane Tsunemori, Initial D, and InuYasha in 3.4–3.7 seconds each.
 - The app owns a loopback-only llama.cpp Q6 server, warms it before capture, and stops only that owned process on F12/Ctrl+C. Q4 KV cache keeps combined OCR/model desktop usage near 27.2 GiB on the 32 GiB RTX 5090.
 - Added a locked-Q1 session-start latch so historical green cards cannot reactivate a completed or newly launched worker.
