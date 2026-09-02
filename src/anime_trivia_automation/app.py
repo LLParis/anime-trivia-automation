@@ -695,7 +695,7 @@ class AnimeTriviaAutomation:
             and self._gemini.availability.available
             and not self._gemini.rate_limited
         )
-        # Account-auth Gemini 3.7 is the measured primary for any clue Discord
+        # Account-auth Gemini 3.8 is the measured primary for any clue Discord
         # exposes semantically, including emoji sequences. Never race a second,
         # lower-accuracy provider into Discord ahead of it. The rate-limited API
         # remains a raw-image fallback when explicitly enabled.
@@ -875,7 +875,7 @@ class AnimeTriviaAutomation:
                     confidence = gemini_result.confidence
                     detail = gemini_result.detail
                 elif provider == "antigravity":
-                    source = "antigravity-account-3.7-low"
+                    source = "antigravity-account-3.8-low"
                     if (
                         self._active_resolution_key != request.key
                         or self._active_status_token != request.round_token
@@ -1260,7 +1260,7 @@ class AnimeTriviaAutomation:
                 f"Using account fallback — "
                 f"{state.request.observation.question_label or 'Question'}"
             ),
-            detail=f"{reason}; asking Antigravity Gemini 3.7 Low",
+            detail=f"{reason}; asking Antigravity Gemini 3.8 Low",
             question=state.request.observation.question_label or "Question",
             clue=state.request.clue,
             answer="—",
@@ -1939,7 +1939,7 @@ class AnimeTriviaAutomation:
             self._status.emit(
                 "LOADING",
                 title="Checking Antigravity account fallback",
-                detail="Verifying cached account auth and Gemini 3.7 Low access",
+                detail="Verifying cached account auth and Gemini 3.8 Low access",
                 readiness="unknown",
             )
             availability = asyncio.run(self._antigravity.preflight())

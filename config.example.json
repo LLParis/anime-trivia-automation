@@ -159,7 +159,7 @@
   "antigravity": {
     "enabled": false,
     "executable": "%LOCALAPPDATA%/agy/bin/agy.exe",
-    "model_slug": "gemini-3.7-flash-low",
+    "model_slug": "gemini-3.8-flash-low",
     "working_root": "runtime/antigravity",
     "preflight_timeout_seconds": 8.0,
     "total_timeout_seconds": 8.0,

@@ -72,7 +72,7 @@ class AntigravityProviderTests(unittest.TestCase):
                 [
                     _ProcessOutcome(
                         0,
-                        b"gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\n",
+                        b"gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n",
                         0.2,
                     ),
                     _ProcessOutcome(0, success_document(), 1.7),
@@ -92,7 +92,7 @@ class AntigravityProviderTests(unittest.TestCase):
             self.assertTrue(result.accepted)
             self.assertEqual(result.answer, "One-Punch Man")
             resolve_argv, resolve_cwd, child_env, _timeout = runner.calls[1]
-            self.assertIn("gemini-3.7-flash-low", resolve_argv)
+            self.assertIn("gemini-3.8-flash-low", resolve_argv)
             self.assertIn("--output-format", resolve_argv)
             self.assertIn("--json-schema", resolve_argv)
             self.assertNotIn("GEMINI_API_KEY", child_env)
@@ -107,7 +107,7 @@ class AntigravityProviderTests(unittest.TestCase):
                 [
                     _ProcessOutcome(
                         0,
-                        b"gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\n",
+                        b"gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n",
                         0.1,
                     )
                 ]
@@ -132,7 +132,7 @@ class AntigravityProviderTests(unittest.TestCase):
                 [
                     _ProcessOutcome(
                         0,
-                        b"gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\n",
+                        b"gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n",
                         0.1,
                     ),
                     _ProcessOutcome(-1, b"", 6.0, timed_out=True),

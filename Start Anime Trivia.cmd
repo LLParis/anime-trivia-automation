@@ -17,7 +17,7 @@ if not exist "config.json" (
   exit /b 1
 )
 
-echo Loading local OCR, reviewed history, and account Gemini 3.7 (Antigravity). Capture starts after ARMED.
+echo Loading local OCR, reviewed history, and account Gemini 3.8 (Antigravity). Capture starts after ARMED.
 echo Any current red or green card can be handled, even if you start mid-quiz.
 echo A verified answer types only after the same card turns green.
 echo If Chrome is in front when the card turns green, Discord is raised once you pause typing,

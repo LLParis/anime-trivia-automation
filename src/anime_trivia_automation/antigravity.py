@@ -397,7 +397,7 @@ class AntigravityProvider:
                     phase="ready",
                     available=True,
                     model=self._config.model_slug,
-                    detail="Antigravity account auth and 3.7 Flash Low are ready",
+                    detail="Antigravity account auth and 3.8 Flash Low are ready",
                     checked_at=time.time(),
                     latency_ms=self._elapsed_ms(started),
                 )

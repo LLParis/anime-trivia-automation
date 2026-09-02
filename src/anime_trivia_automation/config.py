@@ -296,7 +296,7 @@ class AntigravityConfig:
 
     enabled: bool = False
     executable: Path = field(default_factory=_default_antigravity_executable)
-    model_slug: str = "gemini-3.7-flash-low"
+    model_slug: str = "gemini-3.8-flash-low"
     working_root: Path = Path("runtime/antigravity")
     preflight_timeout_seconds: float = 8.0
     total_timeout_seconds: float = 8.0
@@ -740,7 +740,7 @@ def load_config(path: str | Path) -> AppConfig:
         enabled=bool(antigravity_raw.get("enabled", False)),
         executable=resolve_local(os.path.expandvars(str(antigravity_executable))),
         model_slug=str(
-            antigravity_raw.get("model_slug", "gemini-3.7-flash-low")
+            antigravity_raw.get("model_slug", "gemini-3.8-flash-low")
         ),
         working_root=resolve_local(
             str(antigravity_raw.get("working_root", "runtime/antigravity"))
@@ -1079,9 +1079,9 @@ def validate_config(config: AppConfig) -> None:
             raise ValueError(
                 "antigravity.executable must have a valid Google LLC signature"
             )
-        if config.antigravity.model_slug != "gemini-3.7-flash-low":
+        if config.antigravity.model_slug != "gemini-3.8-flash-low":
             raise ValueError(
-                "antigravity.model_slug must be 'gemini-3.7-flash-low'"
+                "antigravity.model_slug must be 'gemini-3.8-flash-low'"
             )
         if min(
             config.antigravity.preflight_timeout_seconds,

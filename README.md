@@ -1,13 +1,13 @@
 # Anime Trivia Automation
 
-Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, answers from reviewed history first, resolves new semantic clues with account-authenticated Gemini 3.7, and types the first verified answer when the same card turns green.
+Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, answers from reviewed history first, resolves new semantic clues with account-authenticated Gemini 3.8, and types the first verified answer when the same card turns green.
 
 Version 0.10.0 is the post-mortem of three lost quizzes (2026-09-01 07:00 and 12:00, 2026-09-02 07:00) and changes the operating policy accordingly:
 
 - **Any live card is answered.** The locked-Question-1 latch is gone. It made the worker ignore every card of a quiz it joined mid-way (all of Q7–Q10 on 2026-09-02 after the launcher crashed and was restarted). Red or green cards are always the live round; only grey cards are inert.
 - **First verified answer wins; later evidence can recover.** A wrong message triggers Discord's five-second slowmode, so follow-up guesses are spaced by at least five seconds. The first grounded answer to arrive is queued immediately; later distinct grounded answers can be tried only while the same card remains green, up to `typing.max_guesses_per_round`. Identical answers are never re-sent.
 - **Confidence and evidence remain real gates.** Antigravity must return a high-confidence structured answer. Local Qwen is a disabled workstation fallback after its 2026-09-02 evaluation produced only 7/20 correct first answers; when enabled elsewhere, an answer must match independent retrieved evidence and ungrounded alternatives are discarded.
-- **The measured provider is primary.** The Gemini Developer API returned 0/24 answers because of rate limits. The workstation therefore uses account-authenticated Antigravity Gemini 3.7 for Discord semantic text and emoji, with both the Developer API and local Qwen submission lanes disabled. If Antigravity cannot answer, the app warns and abstains so manual play remains unblocked.
+- **The measured provider is primary.** The Gemini Developer API returned 0/24 answers because of rate limits. The workstation therefore uses account-authenticated Antigravity Gemini 3.8 for Discord semantic text and emoji, with both the Developer API and local Qwen submission lanes disabled. If Antigravity cannot answer, the app warns and abstains so manual play remains unblocked.
 - **Works while you research manually.** If Chrome/Gemini is in front when the card turns green, the app waits until you have been input-idle for `typing.activation_idle_ms`, raises the one Discord window itself, sends the answer, then hands focus back to the previous window.
 - **Real keystrokes at green.** The complete answer is typed with fast real keystrokes (`typing.composer_write_mode = "type"`, the mechanism that produced the only live submission so far) as soon as the same card is green; every character is verified against the composer, so a human edit cancels the draft without erasing anyone's text. The UI Automation write is still available as `"uia"`.
 - **Every round is on disk.** `runtime/logs/anime-trivia-<stamp>.log` holds the full per-launch log and `runtime/round_ledger.jsonl` records every status event with timestamps, so a failed quiz can be reconstructed instead of guessed at.
@@ -19,7 +19,7 @@ DXcam 60 FPS physical-pixel crop
   -> Discord UI Automation semantic clue read (exact text/emoji)
        -> reviewed 158-pair history (exact text + exact emoji)
        -> fuzzy text cache / strict pHash cache
-       -> unseen semantic clue: Antigravity Gemini 3.7 Low
+       -> unseen semantic clue: Antigravity Gemini 3.8 Low
        -> unresolved: warn and abstain; manual play stays available
   -> at green: raise Discord if needed (operator idle), claim the empty
      #💜anime-chat composer, type the complete answer, verify, Enter
@@ -39,7 +39,7 @@ DXcam 60 FPS physical-pixel crop
 - `src/anime_trivia_automation/status_window.py` — passive top-right status panel using Windows no-activate/click-through styles.
 - `src/anime_trivia_automation/novel.py` — managed llama.cpp lifecycle, exact quote table, local BM25 + web retrieval, one ranked Qwen3.8 synthesis with alternatives, canonicalization.
 - `src/anime_trivia_automation/gemini.py` — hard-deadline Gemini Developer API provider with alternatives, emoji reading, secure key lookup, and a rate-limit circuit.
-- `src/anime_trivia_automation/antigravity.py` — account-authenticated Gemini 3.7 Low CLI provider with structured output, emoji reading, environment isolation, output bounds, absolute deadlines, and owned process-tree shutdown.
+- `src/anime_trivia_automation/antigravity.py` — account-authenticated Gemini 3.8 Low CLI provider with structured output, emoji reading, environment isolation, output bounds, absolute deadlines, and owned process-tree shutdown.
 - `src/anime_trivia_automation/knowledge.py` — read-only exact-quote and FTS5 access to the local source-attributed anime index.
 - `src/anime_trivia_automation/vlm.py` — experimental in-process local VLM; live submission is disabled in config.
 - `data/trivia_history.seed.json` — 158 reviewed clue→answer pairs with per-row provenance.
@@ -62,7 +62,7 @@ Copy-Item .\config.example.json .\config.json
 
 The installed workstation config is already calibrated and should not be overwritten unless recalibrating. The Windows installer creates `.venv`, installs the checkout in editable mode, and uses the shared CUDA PyTorch runtime for PaddleOCR and the frame gate.
 
-The workstation config enables the signed Antigravity CLI at `D:\11_CS\00_TOOLS\Antigravity\agy.exe` (`gemini-3.7-flash-low`) and validates its Google LLC Authenticode signature on every launch, so signed automatic CLI updates do not break the path. It disables the measured-poor local Qwen and rate-limited Gemini Developer API submission lanes. The API key is never stored in JSON or the repository, and Antigravity child processes never receive it.
+The workstation config enables the signed Antigravity CLI at `D:\11_CS\00_TOOLS\Antigravity\agy.exe` (`gemini-3.8-flash-low`) and validates its Google LLC Authenticode signature on every launch, so signed automatic CLI updates do not break the path. It disables the measured-poor local Qwen and rate-limited Gemini Developer API submission lanes. The API key is never stored in JSON or the repository, and Antigravity child processes never receive it.
 
 ## Calibrate the capture region
 
@@ -128,7 +128,7 @@ Resolution order for a live card:
 1. exact semantic history match (including emoji/ZWJ sequences);
 2. fuzzy verified-history/text match with threshold and runner-up margin;
 3. strict pHash match with Hamming-distance and ambiguity margins;
-4. account-authenticated Antigravity Gemini 3.7 Low for a new Discord-semantic clue;
+4. account-authenticated Antigravity Gemini 3.8 Low for a new Discord-semantic clue;
 5. only independently grounded fallbacks may submit when explicitly enabled;
 6. otherwise abstain.
 
