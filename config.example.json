@@ -142,7 +142,7 @@
   "gemini": {
     "enabled": true,
     "api_key_env": "GEMINI_API_KEY",
-    "primary_model": "gemini-3.7-flash",
+    "primary_model": "gemini-3.8-flash",
     "primary_thinking_level": "low",
     "scout_enabled": false,
     "scout_model": "gemini-3.5-flash-lite",

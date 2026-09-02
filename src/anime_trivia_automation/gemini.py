@@ -283,7 +283,7 @@ class GeminiProvider:
                     phase="ready",
                     available=True,
                     model=self._config.primary_model,
-                    detail="Gemini authentication and 3.7 Flash access are ready",
+                    detail="Gemini authentication and 3.8 Flash access are ready",
                     checked_at=time.time(),
                     latency_ms=self._elapsed_ms(started),
                 )
@@ -314,6 +314,14 @@ class GeminiProvider:
                 status="unavailable",
                 started=started,
                 detail=self._availability.detail,
+            )
+        if self.rate_limited:
+            return self._result(
+                request,
+                model=model,
+                status="unavailable",
+                started=started,
+                detail="Gemini API rate-limit circuit is open",
             )
 
         try:

@@ -7,7 +7,7 @@ Version 0.10.0 is the post-mortem of three lost quizzes (2026-09-01 07:00 and 12
 - **Any live card is answered.** The locked-Question-1 latch is gone. It made the worker ignore every card of a quiz it joined mid-way (all of Q7–Q10 on 2026-09-02 after the launcher crashed and was restarted). Red or green cards are always the live round; only grey cards are inert.
 - **First verified answer wins; later evidence can recover.** A wrong message triggers Discord's five-second slowmode, so follow-up guesses are spaced by at least five seconds. The first grounded answer to arrive is queued immediately; later distinct grounded answers can be tried only while the same card remains green, up to `typing.max_guesses_per_round`. Identical answers are never re-sent.
 - **Confidence and evidence remain real gates.** Antigravity must return a high-confidence structured answer. Local Qwen is a disabled workstation fallback after its 2026-09-02 evaluation produced only 7/20 correct first answers; when enabled elsewhere, an answer must match independent retrieved evidence and ungrounded alternatives are discarded.
-- **The measured provider is primary.** The Gemini Developer API returned 0/24 answers because of rate limits. The workstation therefore uses account-authenticated Antigravity Gemini 3.8 for Discord semantic text and emoji, with both the Developer API and local Qwen submission lanes disabled. If Antigravity cannot answer, the app warns and abstains so manual play remains unblocked.
+- **The measured provider is primary.** Account-authenticated Antigravity Gemini 3.8 handles Discord semantic text and emoji. The Gemini 3.8 Developer API is enabled only for a raw-image or account-provider-unavailable fallback; its circuit stops all later calls for five minutes after the first rate-limit error. Local Qwen submission remains disabled.
 - **Works while you research manually.** If Chrome/Gemini is in front when the card turns green, the app waits until you have been input-idle for `typing.activation_idle_ms`, raises the one Discord window itself, sends the answer, then hands focus back to the previous window.
 - **Real keystrokes at green.** The complete answer is typed with fast real keystrokes (`typing.composer_write_mode = "type"`, the mechanism that produced the only live submission so far) as soon as the same card is green; every character is verified against the composer, so a human edit cancels the draft without erasing anyone's text. The UI Automation write is still available as `"uia"`.
 - **Every round is on disk.** `runtime/logs/anime-trivia-<stamp>.log` holds the full per-launch log and `runtime/round_ledger.jsonl` records every status event with timestamps, so a failed quiz can be reconstructed instead of guessed at.
@@ -20,6 +20,7 @@ DXcam 60 FPS physical-pixel crop
        -> reviewed 158-pair history (exact text + exact emoji)
        -> fuzzy text cache / strict pHash cache
        -> unseen semantic clue: Antigravity Gemini 3.8 Low
+       -> raw image or account outage: one Gemini 3.8 Developer API fallback
        -> unresolved: warn and abstain; manual play stays available
   -> at green: raise Discord if needed (operator idle), claim the empty
      #💜anime-chat composer, type the complete answer, verify, Enter
@@ -62,7 +63,7 @@ Copy-Item .\config.example.json .\config.json
 
 The installed workstation config is already calibrated and should not be overwritten unless recalibrating. The Windows installer creates `.venv`, installs the checkout in editable mode, and uses the shared CUDA PyTorch runtime for PaddleOCR and the frame gate.
 
-The workstation config enables the signed Antigravity CLI at `D:\11_CS\00_TOOLS\Antigravity\agy.exe` (`gemini-3.8-flash-low`) and validates its Google LLC Authenticode signature on every launch, so signed automatic CLI updates do not break the path. It disables the measured-poor local Qwen and rate-limited Gemini Developer API submission lanes. The API key is never stored in JSON or the repository, and Antigravity child processes never receive it.
+The workstation config enables the signed Antigravity CLI at `D:\11_CS\00_TOOLS\Antigravity\agy.exe` (`gemini-3.8-flash-low`) and validates its Google LLC Authenticode signature on every launch, so signed automatic CLI updates do not break the path. Gemini 3.8 Developer API is enabled only as the controlled fallback above; local Qwen submission is disabled. The API key is never stored in JSON or the repository, and Antigravity child processes never receive it.
 
 ## Calibrate the capture region
 
@@ -92,7 +93,7 @@ Local-provider accuracy on reviewed clues (no Discord and no paid/account API ca
 .\.venv\Scripts\python.exe .\scripts\eval_resolvers.py --config .\config.json --provider qwen --limit 24
 ```
 
-The Gemini Developer API evaluator is disabled by the workstation config and hard-capped to one call when explicitly enabled. Never use batch evaluation against live Developer API or Antigravity account quota.
+The Gemini Developer API evaluator is hard-capped to one call per invocation. Never use batch evaluation against live Developer API or Antigravity account quota.
 
 Replay saved cards through one warmed OCR/cache process:
 
@@ -130,8 +131,9 @@ Resolution order for a live card:
 2. fuzzy verified-history/text match with threshold and runner-up margin;
 3. strict pHash match with Hamming-distance and ambiguity margins;
 4. account-authenticated Antigravity Gemini 3.8 Low for a new Discord-semantic clue;
-5. only independently grounded fallbacks may submit when explicitly enabled;
-6. otherwise abstain.
+5. at most one Gemini 3.8 Developer API call when a raw image lacks Discord semantics or the account provider is unavailable and its rate-limit circuit is closed;
+6. only independently grounded local fallbacks may submit when explicitly enabled;
+7. otherwise abstain.
 
 No solver answer is written directly to the durable cache. A clue becomes durable only after the same round has progressed red/green→closed and the bot posts exactly one newly observed official reveal. Discord's semantic bot result is primary; spatial OCR is the fallback.
 
@@ -142,7 +144,7 @@ The mutable cache schema is JSON with text, pHash, and semantic maps plus per-en
 - DXcam captures the calibrated region at 60 FPS; CUDA thumbnail/tile comparison suppresses duplicate frames and stabilizes three frames before OCR.
 - The colored-accent prelocator keeps active-card OCR near 60–100 ms; closed grey cards fall back to the full band (400–700 ms).
 - History/cache lookups are effectively immediate.
-- Measured 2026-09-02: Antigravity answered five real text cards correctly in roughly 3.6–4.6 s when it returned before deadline. The local Qwen speed was 1–4 s but only 7/20 evaluated first answers were correct, so it is disabled on the workstation. The Gemini Developer API returned 0/24 answers and is also disabled.
+- Measured 2026-09-02: Antigravity answered five real text cards correctly in roughly 3.6–4.6 s when it returned before deadline. The local Qwen speed was 1–4 s but only 7/20 evaluated first answers were correct, so it is disabled on the workstation. A wasteful Developer API evaluation returned 0/24; batch evaluation is now blocked and the API is reserved for live fallback.
 - Green→Enter for an answer already in hand: readiness OCR pass plus fast keystrokes (12–28 ms per character) plus the 60 ms slack.
 
 ## Implementation references

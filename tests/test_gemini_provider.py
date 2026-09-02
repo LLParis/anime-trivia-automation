@@ -172,15 +172,15 @@ class GeminiProviderTests(unittest.TestCase):
 
         availability, result = asyncio.run(scenario())
         self.assertTrue(availability.available)
-        self.assertEqual(availability.model, "gemini-3.7-flash")
+        self.assertEqual(availability.model, "gemini-3.8-flash")
         self.assertTrue(result.accepted)
         self.assertEqual(result.answer, "Attack on Titan")
-        self.assertEqual(result.model, "gemini-3.7-flash")
+        self.assertEqual(result.model, "gemini-3.8-flash")
         self.assertEqual(factory_calls[0][0], "unit-test-secret")
         self.assertGreaterEqual(factory_calls[0][1], 4000)
 
         request = interactions.calls[0]
-        self.assertEqual(request["model"], "gemini-3.7-flash")
+        self.assertEqual(request["model"], "gemini-3.8-flash")
         self.assertEqual(request["generation_config"], {"thinking_level": "low"})
         self.assertNotIn("tools", request)
         self.assertEqual(request["response_format"]["mime_type"], "application/json")
@@ -254,6 +254,24 @@ class GeminiProviderTests(unittest.TestCase):
         result = asyncio.run(scenario())
         self.assertEqual(result.status, "abstained")
         self.assertIsNone(result.answer)
+
+    def test_rate_limit_opens_circuit_before_a_second_api_call(self) -> None:
+        rate_limit_error = type("RateLimitError", (Exception,), {})
+        provider, interactions, _factory = self.make_provider(
+            [{"ready": True}, rate_limit_error("quota exhausted")]
+        )
+
+        async def scenario():
+            await provider.preflight()
+            first = await provider.resolve(GeminiRequest("first clue", "anime_title"))
+            second = await provider.resolve(GeminiRequest("second clue", "anime_title"))
+            return first, second
+
+        first, second = asyncio.run(scenario())
+        self.assertEqual(first.status, "error")
+        self.assertEqual(second.status, "unavailable")
+        self.assertIn("circuit", second.detail)
+        self.assertEqual(len(interactions.calls), 1)
 
     def test_answer_sanitizer_rejects_discord_mentions(self) -> None:
         provider, _interactions, _factory = self.make_provider(

@@ -1112,7 +1112,7 @@ class LiveRegressionTests(unittest.TestCase):
             question_label="2/10",
             detected_at=time.monotonic(),
             countdown_seconds=5.0,
-            source="gemini-3.7-structured",
+            source="gemini-3.8-structured",
         )
         result: list[bool] = []
         thread = threading.Thread(target=lambda: result.append(executor.execute(task)))
@@ -1148,7 +1148,7 @@ class LiveRegressionTests(unittest.TestCase):
             question_label="2/10",
             detected_at=time.monotonic(),
             countdown_seconds=0.0,
-            source="gemini-3.7-structured",
+            source="gemini-3.8-structured",
         )
         self.assertFalse(executor.execute(task))
         self.assertFalse(executor._controller.entered)

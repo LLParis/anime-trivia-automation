@@ -275,7 +275,7 @@ class GeminiConfig:
 
     enabled: bool = True
     api_key_env: str = "GEMINI_API_KEY"
-    primary_model: str = "gemini-3.7-flash"
+    primary_model: str = "gemini-3.8-flash"
     primary_thinking_level: str = "low"
     scout_enabled: bool = False
     scout_model: str = "gemini-3.5-flash-lite"
@@ -703,7 +703,7 @@ def load_config(path: str | Path) -> AppConfig:
         enabled=bool(gemini_raw.get("enabled", True)),
         api_key_env=str(gemini_raw.get("api_key_env", "GEMINI_API_KEY")),
         primary_model=str(
-            gemini_raw.get("primary_model", "gemini-3.7-flash")
+            gemini_raw.get("primary_model", "gemini-3.8-flash")
         ),
         primary_thinking_level=str(
             gemini_raw.get("primary_thinking_level", "low")
@@ -1030,8 +1030,8 @@ def validate_config(config: AppConfig) -> None:
     if config.gemini.enabled:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", config.gemini.api_key_env):
             raise ValueError("gemini.api_key_env must be an environment variable name")
-        if config.gemini.primary_model != "gemini-3.7-flash":
-            raise ValueError("gemini.primary_model must be 'gemini-3.7-flash'")
+        if config.gemini.primary_model != "gemini-3.8-flash":
+            raise ValueError("gemini.primary_model must be 'gemini-3.8-flash'")
         if config.gemini.primary_thinking_level not in {"minimal", "low", "medium"}:
             raise ValueError(
                 "gemini.primary_thinking_level must be 'minimal', 'low', or 'medium'"

@@ -297,7 +297,7 @@ class AsyncResolutionTests(unittest.TestCase):
             ProviderResolution(
                 key=state.request.key,
                 provider="gemini",
-                source="gemini-3.7-structured",
+                source="gemini-3.8-structured",
                 answer="First Answer",
                 confidence=0.80,
                 elapsed_ms=1500.0,
@@ -536,7 +536,7 @@ class AsyncResolutionTests(unittest.TestCase):
             ProviderResolution(
                 key=state.request.key,
                 provider="gemini",
-                source="gemini-3.7-structured",
+                source="gemini-3.8-structured",
                 answer="One-Punch Man",
                 confidence=0.99,
                 elapsed_ms=1500.0,
@@ -568,7 +568,7 @@ class AsyncResolutionTests(unittest.TestCase):
         state.providers = {"gemini", "qwen"}
         state.pending = {"gemini", "qwen"}
         for provider, source in (
-            ("gemini", "gemini-3.7-structured"),
+            ("gemini", "gemini-3.8-structured"),
             ("qwen", "qwen38-retrieval-consensus"),
         ):
             app._accept_resolution_result(

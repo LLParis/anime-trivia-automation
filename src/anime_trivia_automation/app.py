@@ -868,7 +868,7 @@ class AnimeTriviaAutomation:
                         confidence = self._novel.last_confidence
                         detail = self._novel.last_detail
                 elif provider == "gemini":
-                    source = "gemini-3.7-structured"
+                    source = "gemini-3.8-structured"
                     gemini_result = self._resolve_with_gemini(request)
                     answer = gemini_result.answer if gemini_result.accepted else None
                     alternatives = tuple(gemini_result.alternatives)
@@ -1919,7 +1919,7 @@ class AnimeTriviaAutomation:
             self._status.emit(
                 "LOADING",
                 title="Checking Gemini API solver",
-                detail="Verifying credentials and Gemini 3.7 Flash availability",
+                detail="Verifying credentials and Gemini 3.8 Flash availability",
                 readiness="unknown",
             )
             availability = self._run_gemini_coroutine(
