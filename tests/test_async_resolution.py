@@ -79,6 +79,30 @@ def make_async_app(signature: str, fingerprint: str, round_token: str):
 
 
 class AsyncResolutionTests(unittest.TestCase):
+    def test_visual_fingerprint_stays_stable_across_green_crop_jitter(self) -> None:
+        app = AnimeTriviaAutomation.__new__(AnimeTriviaAutomation)
+        app._accessible_round = None
+        app._pending_round = PendingRound(
+            signature="round:anime_title:2/10",
+            question_label="2/10",
+            expected_answer_type="anime_title",
+            prompt_kind="visual",
+            clue="Visual / emoji clue",
+            clue_fingerprint="visual:locked-hash",
+        )
+        observation = SimpleNamespace(
+            signature="round:anime_title:2/10",
+            question_label="2/10",
+            prompt_kind="visual",
+            hint_text="",
+            perceptual_hash="ready-border-jitter-hash",
+        )
+
+        self.assertEqual(
+            app._stable_live_clue_fingerprint(observation),
+            "visual:locked-hash",
+        )
+
     def test_semantic_emoji_uses_account_provider_without_double_voting(self) -> None:
         signature = "round:anime_title:3/10"
         app, state = make_async_app(

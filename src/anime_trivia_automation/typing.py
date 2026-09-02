@@ -1171,8 +1171,10 @@ class SafeKeyboardExecutor:
                     self.suppress_task(task, "atomic composer write was ambiguous")
                     return False
                 if commit_result == "stale":
-                    LOGGER.info("Atomic commit canceled because the round changed")
-                    return False
+                    LOGGER.info(
+                        "Commit deferred during transient scene uncertainty; revalidating"
+                    )
+                    continue
                 LOGGER.info(
                     "Atomic commit lost safe ownership; returning to passive wait"
                 )

@@ -1375,6 +1375,39 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertEqual(composer.text, "")
         self.assertIsNone(executor._orphaned_draft)
 
+    def test_transient_commit_uncertainty_retries_same_green_task(self) -> None:
+        active = ActivePromptState()
+        signature = "round:anime_title:1/10"
+        active.update(signature, "ready", 1, "text:future-rules")
+        composer = FakeComposer()
+        executor = make_executor(active, composer)
+        task = AnswerTask(
+            answer="Chainsaw Man",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="1/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="antigravity-account-3.8-low",
+            round_token="session-1:round-1",
+            clue_fingerprint="text:future-rules",
+        )
+        attempts: list[str] = []
+
+        def commit(_task, answer, _window, _composer):
+            attempts.append(answer)
+            if len(attempts) == 1:
+                return "stale"
+            composer.text = answer
+            return "committed"
+
+        executor._commit_complete_answer = commit
+
+        self.assertTrue(executor.execute(task))
+        self.assertEqual(attempts, ["Chainsaw Man", "Chainsaw Man"])
+        self.assertTrue(executor._controller.entered)
+        self.assertEqual(composer.text, "")
+
     def test_orphan_cleanup_targets_owned_editor_without_keyboard_shortcuts(self) -> None:
         active = ActivePromptState()
         composer = FakeComposer()

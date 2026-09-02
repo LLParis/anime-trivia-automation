@@ -155,6 +155,8 @@ class AnimeTriviaAutomation:
         # covers a whole live card transition without permitting an unbounded
         # executor queue.
         self._resolution_slots = threading.BoundedSemaphore(6)
+        self._provider_attempts_lock = threading.Lock()
+        self._provider_round_attempts: set[tuple[str, str]] = set()
         self._provider_locks: dict[str, Any] = {
             "qwen": threading.Lock(),
             "gemini": threading.BoundedSemaphore(2),
@@ -336,6 +338,20 @@ class AnimeTriviaAutomation:
         if accessible_clue is None and observation.perceptual_hash:
             return f"visual:{observation.perceptual_hash}"
         return "semantic:" + normalize_accessible_clue(clue)
+
+    def _stable_live_clue_fingerprint(self, observation: PromptObservation) -> str:
+        """Keep one visual identity across red/green crop and border jitter."""
+
+        fingerprint = self._clue_fingerprint(observation)
+        pending = self._pending_round
+        if (
+            observation.prompt_kind == "visual"
+            and pending is not None
+            and pending.signature == observation.signature
+            and pending.question_label == observation.question_label
+        ):
+            return pending.clue_fingerprint
+        return fingerprint
 
     @staticmethod
     def _canonical_text_clue(clue: str) -> str:
@@ -565,7 +581,7 @@ class AnimeTriviaAutomation:
             hit = self._cache.match_image(observation.perceptual_hash or "")
         lookup_ms = (time.perf_counter() - lookup_start) * 1000.0
         live_clue = self._display_clue(observation)
-        clue_fingerprint = self._clue_fingerprint(observation)
+        clue_fingerprint = self._stable_live_clue_fingerprint(observation)
         if not self._dispatcher.observe_prompt(
             observation.signature,
             observation.readiness,
@@ -786,6 +802,22 @@ class AnimeTriviaAutomation:
     def _submit_resolution_provider(
         self, provider: str, request: ResolutionRequest
     ) -> None:
+        attempt_key = (request.round_token, provider)
+        with self._provider_attempts_lock:
+            if attempt_key in self._provider_round_attempts:
+                self._put_resolution_result(
+                    ProviderResolution(
+                        key=request.key,
+                        provider=provider,
+                        source=f"{provider}-resolver",
+                        answer=None,
+                        confidence=0.0,
+                        elapsed_ms=0.0,
+                        error="duplicate round provider attempt blocked",
+                    )
+                )
+                return
+            self._provider_round_attempts.add(attempt_key)
         if self._stop_event.is_set() or not self._resolution_slots.acquire(
             blocking=False
         ):
@@ -800,6 +832,8 @@ class AnimeTriviaAutomation:
                     error="resolver capacity unavailable",
                 )
             )
+            with self._provider_attempts_lock:
+                self._provider_round_attempts.discard(attempt_key)
             return
         try:
             future = self._resolution_executor.submit(
@@ -807,6 +841,8 @@ class AnimeTriviaAutomation:
             )
         except RuntimeError as exc:
             self._resolution_slots.release()
+            with self._provider_attempts_lock:
+                self._provider_round_attempts.discard(attempt_key)
             self._put_resolution_result(
                 ProviderResolution(
                     key=request.key,
@@ -1080,6 +1116,10 @@ class AnimeTriviaAutomation:
             state.providers.discard(result.provider)
             if result.provider == "antigravity":
                 state.fallback_started = False
+            with self._provider_attempts_lock:
+                self._provider_round_attempts.discard(
+                    (state.request.round_token, result.provider)
+                )
             self._advance_empty_route(
                 state, reason="The clue returned after stale queued work"
             )
@@ -1484,6 +1524,8 @@ class AnimeTriviaAutomation:
         self._accessible_round = None
         self._active_resolution_key = None
         self._resolution_rounds.clear()
+        with self._provider_attempts_lock:
+            self._provider_round_attempts.clear()
         self._dispatcher.observe_prompt(
             None,
             "closed",
@@ -1659,7 +1701,7 @@ class AnimeTriviaAutomation:
         ):
             clue = self._accessible_round[1]
             semantic_clue = True
-        clue_fingerprint = self._clue_fingerprint(observation)
+        clue_fingerprint = self._stable_live_clue_fingerprint(observation)
         effective_prompt_kind = (
             self._effective_prompt_kind(observation.prompt_kind, clue)
             if semantic_clue
