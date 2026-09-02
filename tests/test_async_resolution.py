@@ -38,9 +38,16 @@ def make_async_app(signature: str, fingerprint: str, round_token: str):
     app._status_resolution = {}
     app._status = NullStatus()
     app._dispatcher = RecordingDispatcher()
+    app._config = SimpleNamespace(
+        antigravity=SimpleNamespace(enabled=False),
+    )
+    app._antigravity = SimpleNamespace(
+        availability=SimpleNamespace(available=False),
+    )
     scene = SimpleNamespace(detected_at=time.monotonic())
     observation = SimpleNamespace(
         signature=signature,
+        prompt_kind="text",
         expected_answer_type="anime_title",
         question_label="1/10",
         countdown_seconds=5.0,
@@ -247,6 +254,176 @@ class AsyncResolutionTests(unittest.TestCase):
                 elapsed_ms=3800.0,
             )
         )
+        self.assertTrue(state.conflicted)
+        self.assertIsNone(state.candidate)
+        self.assertEqual(app._dispatcher.tasks, [])
+
+    def test_antigravity_fallback_answers_after_primary_abstention(self) -> None:
+        signature = "round:character:7/10"
+        fingerprint = "text:airi clue"
+        round_token = "session-1:round-7:7/10"
+        app, state = make_async_app(signature, fingerprint, round_token)
+        state.request.observation.prompt_kind = "text"
+        state.providers = {"gemini", "qwen"}
+        state.pending = {"gemini", "qwen"}
+        app._config.antigravity.enabled = True
+        app._antigravity.availability.available = True
+        submitted_providers: list[str] = []
+        app._submit_resolution_provider = (  # type: ignore[method-assign]
+            lambda provider, _request: submitted_providers.append(provider)
+        )
+
+        for provider in ("gemini", "qwen"):
+            app._accept_resolution_result(
+                ProviderResolution(
+                    key=state.request.key,
+                    provider=provider,
+                    source=f"{provider}-resolver",
+                    answer=None,
+                    confidence=0.0,
+                    elapsed_ms=100.0,
+                )
+            )
+        self.assertTrue(state.fallback_started)
+        self.assertEqual(state.pending, {"antigravity"})
+        self.assertEqual(submitted_providers, ["antigravity"])
+
+        app._accept_resolution_result(
+            ProviderResolution(
+                key=state.request.key,
+                provider="antigravity",
+                source="antigravity-account-3.7-low",
+                answer="Airi Katagiri",
+                confidence=0.95,
+                elapsed_ms=3700.0,
+            )
+        )
+        self.assertEqual(state.candidate.answer, "Airi Katagiri")
+        self.assertEqual(app._dispatcher.tasks[0].answer, "Airi Katagiri")
+
+    def test_antigravity_can_run_when_no_primary_provider_is_available(self) -> None:
+        signature = "round:character:7/10"
+        fingerprint = "text:airi clue"
+        round_token = "session-1:round-7:7/10"
+        app, original_state = make_async_app(signature, fingerprint, round_token)
+        app._config.antigravity.enabled = True
+        app._antigravity.availability.available = True
+        app._enabled_resolution_providers = lambda *_args: set()  # type: ignore[method-assign]
+        submitted: list[tuple[str, ResolutionRequest]] = []
+        app._submit_resolution_provider = (  # type: ignore[method-assign]
+            lambda provider, request: submitted.append((provider, request))
+        )
+
+        state = app._start_async_resolution(
+            key=(round_token, fingerprint),
+            round_token=round_token,
+            clue_fingerprint=fingerprint,
+            clue="A hardworking student who encourages an older manga artist.",
+            observation=original_state.request.observation,
+            ocr_ms=1.0,
+            extract_ms=1.0,
+            lookup_ms=1.0,
+        )
+
+        self.assertTrue(state.fallback_started)
+        self.assertEqual(state.pending, {"antigravity"})
+        self.assertEqual(submitted[0][0], "antigravity")
+        self.assertGreaterEqual(submitted[0][1].started_at, state.request.started_at)
+
+    def test_inactive_same_round_fingerprint_does_not_spend_fallback_quota(self) -> None:
+        signature = "round:anime_title:1/10"
+        fingerprint_a = "text:stable clue a"
+        fingerprint_b = "text:corrected clue b"
+        round_token = "session-1:round-1:1/10"
+        app, state = make_async_app(signature, fingerprint_a, round_token)
+        state.providers = {"qwen"}
+        state.pending = {"qwen"}
+        app._config.antigravity.enabled = True
+        app._antigravity.availability.available = True
+        app._active_resolution_key = (round_token, fingerprint_b)
+        submitted: list[str] = []
+        app._submit_resolution_provider = (  # type: ignore[method-assign]
+            lambda provider, _request: submitted.append(provider)
+        )
+
+        app._accept_resolution_result(
+            ProviderResolution(
+                key=state.request.key,
+                provider="qwen",
+                source="qwen38-retrieval-consensus",
+                answer=None,
+                confidence=0.0,
+                elapsed_ms=3800.0,
+            )
+        )
+
+        self.assertFalse(state.fallback_started)
+        self.assertEqual(submitted, [])
+
+        app._active_resolution_key = state.request.key
+        app._active_prompt.update(signature, "locked", 3, fingerprint_a)
+        app._emit_unknown_if_complete(state)
+        self.assertTrue(state.fallback_started)
+        self.assertEqual(submitted, ["antigravity"])
+
+    def test_queued_antigravity_revalidates_fingerprint_before_cli_launch(self) -> None:
+        signature = "round:anime_title:1/10"
+        fingerprint_a = "text:stable clue a"
+        fingerprint_b = "text:corrected clue b"
+        round_token = "session-1:round-1:1/10"
+        app, state = make_async_app(signature, fingerprint_a, round_token)
+        app._active_resolution_key = (round_token, fingerprint_b)
+        app._provider_locks = {"antigravity": threading.Lock()}
+        app._config.antigravity.total_timeout_seconds = 6.0
+        calls: list[str] = []
+
+        async def resolve_never_called(_request):
+            calls.append("called")
+            raise AssertionError("stale fallback launched the CLI")
+
+        app._antigravity.resolve = resolve_never_called
+        result = app._run_resolution_provider("antigravity", state.request)
+
+        self.assertEqual(result.error, "stale")
+        self.assertEqual(calls, [])
+
+    def test_antigravity_never_double_votes_a_primary_disagreement(self) -> None:
+        signature = "round:anime_title:1/10"
+        fingerprint = "text:ambiguous"
+        round_token = "session-1:round-1:1/10"
+        app, state = make_async_app(signature, fingerprint, round_token)
+        state.request.observation.prompt_kind = "text"
+        state.providers = {"gemini", "qwen"}
+        state.pending = {"gemini", "qwen"}
+        app._config.antigravity.enabled = True
+        app._antigravity.availability.available = True
+        submitted: list[str] = []
+        app._submit_resolution_provider = (  # type: ignore[method-assign]
+            lambda provider, _request: submitted.append(provider)
+        )
+
+        app._accept_resolution_result(
+            ProviderResolution(
+                key=state.request.key,
+                provider="gemini",
+                source="gemini-3.7-structured",
+                answer="One-Punch Man",
+                confidence=0.99,
+                elapsed_ms=1500.0,
+            )
+        )
+        app._accept_resolution_result(
+            ProviderResolution(
+                key=state.request.key,
+                provider="qwen",
+                source="qwen38-retrieval-consensus",
+                answer="Dragon Ball Z",
+                confidence=0.99,
+                elapsed_ms=3800.0,
+            )
+        )
+        self.assertEqual(submitted, [])
+        self.assertFalse(state.fallback_started)
         self.assertTrue(state.conflicted)
         self.assertIsNone(state.candidate)
         self.assertEqual(app._dispatcher.tasks, [])

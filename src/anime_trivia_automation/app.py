@@ -18,6 +18,10 @@ from typing import Any
 from .cache import TriviaCache
 from .capture import DXCapture, GpuFrameChangeGate
 from .config import AppConfig
+from .antigravity import (
+    AntigravityProvider,
+    AntigravityRequest,
+)
 from .discord import DiscordQuestionLocator
 from .gemini import GeminiProvider, GeminiRequest, GeminiResult
 from .models import AnswerTask, CacheHit, PromptObservation, Scene
@@ -96,6 +100,7 @@ class AsyncResolutionRound:
     queued: bool = False
     unknown_emitted: bool = False
     conflicted: bool = False
+    fallback_started: bool = False
     retired: bool = False
 
 
@@ -147,6 +152,7 @@ class AnimeTriviaAutomation:
         self._provider_locks: dict[str, Any] = {
             "qwen": threading.Lock(),
             "gemini": threading.BoundedSemaphore(2),
+            "antigravity": threading.Lock(),
             "vlm": threading.Lock(),
         }
         self._resolution_shutdown_lock = threading.Lock()
@@ -185,6 +191,7 @@ class AnimeTriviaAutomation:
         self._vlm = LazyQwenResolver(config.vlm)
         self._novel = NovelAnswerResolver(config.novel)
         self._gemini = GeminiProvider(config.gemini)
+        self._antigravity = AntigravityProvider(config.antigravity)
         self._gemini_loop: asyncio.AbstractEventLoop | None = None
         self._gemini_loop_thread: threading.Thread | None = None
         self._gemini_loop_ready = threading.Event()
@@ -710,6 +717,10 @@ class AnimeTriviaAutomation:
         )
         self._resolution_rounds[key] = state
         if not providers:
+            if self._maybe_start_antigravity_fallback(
+                state, reason="No primary resolver is currently available"
+            ):
+                return state
             LOGGER.warning(
                 "No verified resolver is enabled for prompt %s",
                 observation.question_label or "?",
@@ -807,6 +818,43 @@ class AnimeTriviaAutomation:
                     answer = gemini_result.answer if gemini_result.accepted else None
                     confidence = gemini_result.confidence
                     detail = gemini_result.detail
+                elif provider == "antigravity":
+                    source = "antigravity-account-3.7-low"
+                    if (
+                        self._active_resolution_key != request.key
+                        or self._active_status_token != request.round_token
+                        or self._active_status_closed
+                        or not self._active_prompt.is_open(
+                            request.signature, request.clue_fingerprint
+                        )
+                    ):
+                        error = "stale"
+                        detail = "Antigravity request became stale before launch"
+                    else:
+                        antigravity_result = asyncio.run(
+                            self._antigravity.resolve(
+                                AntigravityRequest(
+                                    clue=request.clue,
+                                    expected_answer_type=(
+                                        request.observation.expected_answer_type
+                                    ),
+                                    prompt_kind=request.observation.prompt_kind,
+                                    deadline=(
+                                        request.started_at
+                                        + float(
+                                            self._config.antigravity.total_timeout_seconds
+                                        )
+                                    ),
+                                )
+                            )
+                        )
+                        answer = (
+                            antigravity_result.answer
+                            if antigravity_result.accepted
+                            else None
+                        )
+                        confidence = antigravity_result.confidence
+                        detail = antigravity_result.detail
                 elif provider == "vlm":
                     source = "local-model-consensus"
                     answer = self._vlm.resolve(request.observation)
@@ -964,6 +1012,14 @@ class AnimeTriviaAutomation:
             return
         state.pending.remove(result.provider)
         state.results[result.provider] = result
+        if result.provider == "antigravity" and result.error == "stale":
+            state.results.pop("antigravity", None)
+            state.providers.discard("antigravity")
+            state.fallback_started = False
+            self._maybe_start_antigravity_fallback(
+                state, reason="The clue returned after a stale queued fallback"
+            )
+            return
         if (
             state.retired
             or self._quiz_ended
@@ -986,34 +1042,53 @@ class AnimeTriviaAutomation:
         answers_by_key: dict[str, list[ProviderResolution]] = {}
         for item in answered:
             answers_by_key.setdefault(normalize_question(item.answer or ""), []).append(item)
-        if len(answers_by_key) > 1:
-            state.conflicted = True
-            state.unknown_emitted = True
-            previous_resolution = self._status_resolution.get(
-                state.request.round_token
-            )
-            self._status_resolution[state.request.round_token] = "unknown"
-            LOGGER.warning(
-                "Resolver disagreement for %s; no answer will be submitted",
-                state.request.observation.question_label or "?",
-            )
-            if self._active_resolution_key == state.request.key:
-                self._status.emit(
-                    "ATTENTION",
-                    title=(
-                        f"Resolvers disagree — "
-                        f"{state.request.observation.question_label or 'Question'}"
-                    ),
-                    detail="Gemini and local evidence differ; manual answer required",
-                    question=state.request.observation.question_label or "Question",
-                    clue=state.request.clue,
-                    answer="SKIP",
-                    source="resolver disagreement",
-                    readiness=state.request.observation.readiness,
-                    event_id=f"{state.request.round_token}:disagreement",
-                    increment="unknown" if previous_resolution is None else None,
-                )
+        if not answered and self._maybe_start_antigravity_fallback(
+            state, reason="Primary resolvers abstained or were unavailable"
+        ):
             return
+        if len(answers_by_key) > 1:
+            ranked_groups = sorted(
+                answers_by_key.values(), key=len, reverse=True
+            )
+            if (
+                len(ranked_groups[0]) >= 2
+                and len(ranked_groups[0]) > len(answered) / 2
+            ):
+                answered = ranked_groups[0]
+                answers_by_key = {
+                    normalize_question(answered[0].answer or ""): answered
+                }
+            else:
+                state.conflicted = True
+                state.unknown_emitted = True
+                previous_resolution = self._status_resolution.get(
+                    state.request.round_token
+                )
+                self._status_resolution[state.request.round_token] = "unknown"
+                LOGGER.warning(
+                    "Resolver disagreement for %s; no answer will be submitted",
+                    state.request.observation.question_label or "?",
+                )
+                if self._active_resolution_key == state.request.key:
+                    self._status.emit(
+                        "ATTENTION",
+                        title=(
+                            f"Resolvers disagree — "
+                            f"{state.request.observation.question_label or 'Question'}"
+                        ),
+                        detail=(
+                            "Gemini, local, and account evidence remain split; "
+                            "manual answer required"
+                        ),
+                        question=state.request.observation.question_label or "Question",
+                        clue=state.request.clue,
+                        answer="SKIP",
+                        source="resolver disagreement",
+                        readiness=state.request.observation.readiness,
+                        event_id=f"{state.request.round_token}:disagreement",
+                        increment="unknown" if previous_resolution is None else None,
+                    )
+                return
 
         if answered:
             # Prefer the frontier Gemini spelling when providers agree; if only
@@ -1069,12 +1144,56 @@ class AnimeTriviaAutomation:
         self._queue_resolution_candidate(state)
         self._emit_unknown_if_complete(state)
 
+    def _maybe_start_antigravity_fallback(
+        self, state: AsyncResolutionRound, *, reason: str
+    ) -> bool:
+        if (
+            state.fallback_started
+            or state.retired
+            or self._stop_event.is_set()
+            or self._quiz_ended
+            or self._active_resolution_key != state.request.key
+            or self._active_status_token != state.request.round_token
+            or self._active_status_closed
+            or not self._active_prompt.is_open(
+                state.request.signature, state.request.clue_fingerprint
+            )
+            or state.request.observation.prompt_kind != "text"
+            or not self._config.antigravity.enabled
+            or not self._antigravity.availability.available
+        ):
+            return False
+        state.fallback_started = True
+        state.providers.add("antigravity")
+        state.pending.add("antigravity")
+        self._status.emit(
+            "RESOLVING",
+            title=(
+                f"Using account fallback — "
+                f"{state.request.observation.question_label or 'Question'}"
+            ),
+            detail=f"{reason}; asking Antigravity Gemini 3.7 Low",
+            question=state.request.observation.question_label or "Question",
+            clue=state.request.clue,
+            answer="—",
+            source="Antigravity account quota",
+            readiness=state.request.observation.readiness,
+            event_id=f"{state.request.round_token}:antigravity",
+        )
+        # Give the fallback its own absolute queue+execution budget. This
+        # prevents an old queued request from starting a fresh six-second call
+        # after the round has already moved on.
+        fallback_request = replace(state.request, started_at=time.perf_counter())
+        self._submit_resolution_provider("antigravity", fallback_request)
+        return True
+
     def _queue_resolution_candidate(self, state: AsyncResolutionRound) -> bool:
         candidate = state.candidate
         if state.retired or state.queued or candidate is None or candidate.answer is None:
             return False
         if (
-            self._active_status_token != state.request.round_token
+            self._active_resolution_key != state.request.key
+            or self._active_status_token != state.request.round_token
             or self._active_status_closed
             or not self._active_prompt.is_open(
                 state.request.signature,
@@ -1156,12 +1275,17 @@ class AnimeTriviaAutomation:
         ):
             return
         if (
-            self._active_status_token != state.request.round_token
+            self._active_resolution_key != state.request.key
+            or self._active_status_token != state.request.round_token
             or self._active_status_closed
             or not self._active_prompt.is_open(
                 state.request.signature,
                 state.request.clue_fingerprint,
             )
+        ):
+            return
+        if self._maybe_start_antigravity_fallback(
+            state, reason="Primary resolvers completed while this clue was inactive"
         ):
             return
         state.unknown_emitted = True
@@ -1619,7 +1743,7 @@ class AnimeTriviaAutomation:
 
     def run(self) -> None:
         LOGGER.info(
-            "Starting Anime Trivia Automation%s with Gemini 3.7 and local Qwen. Keep Anime Soul visible; manual research remains a fallback. Press %s to stop.",
+            "Starting Anime Trivia Automation%s with Gemini 3.7 API, local Qwen, and the account fallback. Keep Anime Soul visible; manual research remains available. Press %s to stop.",
             " in DRY RUN mode" if not self._config.typing.enabled else "",
             self._config.typing.stop_key.upper(),
         )
@@ -1660,6 +1784,25 @@ class AnimeTriviaAutomation:
                     detail=availability.detail,
                     readiness="unknown",
                     event_id="gemini-unavailable",
+                )
+        if self._config.antigravity.enabled:
+            self._status.emit(
+                "LOADING",
+                title="Checking Antigravity account fallback",
+                detail="Verifying cached account auth and Gemini 3.7 Low access",
+                readiness="unknown",
+            )
+            availability = asyncio.run(self._antigravity.preflight())
+            if not availability.available:
+                LOGGER.warning(
+                    "Antigravity fallback unavailable: %s", availability.detail
+                )
+                self._status.emit(
+                    "ATTENTION",
+                    title="Antigravity unavailable — primary solvers remain active",
+                    detail=availability.detail,
+                    readiness="unknown",
+                    event_id="antigravity-unavailable",
                 )
 
         self._dispatcher.start()
@@ -1713,6 +1856,12 @@ class AnimeTriviaAutomation:
             if self._resolution_shutdown:
                 return
             self._resolution_shutdown = True
+        # Kill an exact in-flight account-auth CLI process before waiting on
+        # resolver threads, so F12 cannot inherit the provider's full timeout.
+        try:
+            asyncio.run(self._antigravity.close())
+        except Exception:
+            LOGGER.debug("Antigravity provider close failed", exc_info=True)
         self._resolution_executor.shutdown(wait=True, cancel_futures=True)
         self._novel.close()
         loop = self._gemini_loop

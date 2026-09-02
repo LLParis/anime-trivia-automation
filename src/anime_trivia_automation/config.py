@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -10,6 +11,13 @@ from typing import Any
 from urllib.parse import urlsplit
 
 Region = tuple[int, int, int, int]
+
+
+def _default_antigravity_executable() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / "agy" / "bin" / "agy.exe"
+    return Path("agy.exe")
 
 
 def _region(
@@ -211,6 +219,22 @@ class GeminiConfig:
 
 
 @dataclass(frozen=True)
+class AntigravityConfig:
+    """Account-authenticated, text-only Antigravity CLI resolver."""
+
+    enabled: bool = False
+    executable: Path = field(default_factory=_default_antigravity_executable)
+    model_slug: str = "gemini-3.7-flash-low"
+    working_root: Path = Path("runtime/antigravity")
+    preflight_timeout_seconds: float = 8.0
+    total_timeout_seconds: float = 6.0
+    min_confidence: float = 0.90
+    max_answer_characters: int = 96
+    max_clue_characters: int = 2000
+    max_stdout_bytes: int = 262_144
+
+
+@dataclass(frozen=True)
 class TypingConfig:
     enabled: bool = True
     expected_process_names: tuple[str, ...] = ("Discord.exe",)
@@ -271,6 +295,7 @@ class AppConfig:
     vlm: VlmConfig = field(default_factory=VlmConfig)
     novel: NovelConfig = field(default_factory=NovelConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
+    antigravity: AntigravityConfig = field(default_factory=AntigravityConfig)
     typing: TypingConfig = field(default_factory=TypingConfig)
     status: StatusConfig = field(default_factory=StatusConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -292,6 +317,7 @@ def load_config(path: str | Path) -> AppConfig:
     vlm_raw = _section(raw, "vlm")
     novel_raw = _section(raw, "novel")
     gemini_raw = _section(raw, "gemini")
+    antigravity_raw = _section(raw, "antigravity")
     typing_raw = _section(raw, "typing")
     status_raw = _section(raw, "status")
     runtime_raw = _section(raw, "runtime")
@@ -608,6 +634,38 @@ def load_config(path: str | Path) -> AppConfig:
         max_image_bytes=int(gemini_raw.get("max_image_bytes", 4_000_000)),
     )
 
+    antigravity_executable = antigravity_raw.get(
+        "executable", str(_default_antigravity_executable())
+    )
+    antigravity = AntigravityConfig(
+        enabled=bool(antigravity_raw.get("enabled", False)),
+        executable=resolve_local(os.path.expandvars(str(antigravity_executable))),
+        model_slug=str(
+            antigravity_raw.get("model_slug", "gemini-3.7-flash-low")
+        ),
+        working_root=resolve_local(
+            str(antigravity_raw.get("working_root", "runtime/antigravity"))
+        ),
+        preflight_timeout_seconds=float(
+            antigravity_raw.get("preflight_timeout_seconds", 8.0)
+        ),
+        total_timeout_seconds=float(
+            antigravity_raw.get("total_timeout_seconds", 6.0)
+        ),
+        min_confidence=float(
+            antigravity_raw.get("min_confidence", 0.90)
+        ),
+        max_answer_characters=int(
+            antigravity_raw.get("max_answer_characters", 96)
+        ),
+        max_clue_characters=int(
+            antigravity_raw.get("max_clue_characters", 2000)
+        ),
+        max_stdout_bytes=int(
+            antigravity_raw.get("max_stdout_bytes", 262_144)
+        ),
+    )
+
     seed_cache_value = runtime_raw.get("seed_cache_path", "data/trivia_cache.seed.json")
     history_value = runtime_raw.get("history_path", "data/trivia_history.seed.json")
     runtime = RuntimeConfig(
@@ -641,6 +699,7 @@ def load_config(path: str | Path) -> AppConfig:
         vlm=vlm,
         novel=novel,
         gemini=gemini,
+        antigravity=antigravity,
         typing=typing,
         status=status,
         runtime=runtime,
@@ -896,6 +955,51 @@ def validate_config(config: AppConfig) -> None:
             raise ValueError(
                 "gemini.max_image_bytes must be between 1024 and 20000000"
             )
+    if config.antigravity.enabled:
+        expected_executable = _default_antigravity_executable().resolve()
+        if not config.antigravity.executable.is_file():
+            raise ValueError("antigravity.executable is missing")
+        if os.path.normcase(str(config.antigravity.executable.resolve())) != os.path.normcase(
+            str(expected_executable)
+        ):
+            raise ValueError("antigravity.executable must be the installed agy.exe")
+        if config.antigravity.model_slug != "gemini-3.7-flash-low":
+            raise ValueError(
+                "antigravity.model_slug must be 'gemini-3.7-flash-low'"
+            )
+        if min(
+            config.antigravity.preflight_timeout_seconds,
+            config.antigravity.total_timeout_seconds,
+        ) <= 0:
+            raise ValueError("antigravity timeout values must be positive")
+        if config.antigravity.preflight_timeout_seconds > 30.0:
+            raise ValueError(
+                "antigravity.preflight_timeout_seconds cannot exceed 30 seconds"
+            )
+        if config.antigravity.total_timeout_seconds > 15.0:
+            raise ValueError(
+                "antigravity.total_timeout_seconds cannot exceed 15 seconds"
+            )
+        if not 0.0 <= config.antigravity.min_confidence <= 1.0:
+            raise ValueError(
+                "antigravity.min_confidence must be between 0 and 1"
+            )
+        if not 1 <= config.antigravity.max_answer_characters <= 200:
+            raise ValueError(
+                "antigravity.max_answer_characters must be between 1 and 200"
+            )
+        if not 32 <= config.antigravity.max_clue_characters <= 10_000:
+            raise ValueError(
+                "antigravity.max_clue_characters must be between 32 and 10000"
+            )
+        if not 4096 <= config.antigravity.max_stdout_bytes <= 2_000_000:
+            raise ValueError(
+                "antigravity.max_stdout_bytes must be between 4096 and 2000000"
+            )
+        if config.antigravity.working_root == Path(
+            config.antigravity.working_root.anchor
+        ):
+            raise ValueError("antigravity.working_root cannot be a filesystem root")
     if config.typing.pre_delay_seconds[0] > config.typing.pre_delay_seconds[1]:
         raise ValueError("typing.pre_delay_seconds minimum exceeds maximum")
     if config.typing.pre_delay_seconds[0] < 0:

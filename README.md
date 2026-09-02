@@ -1,8 +1,8 @@
 # Anime Trivia Automation
 
-Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, uses reviewed history first, resolves genuinely new clues with Gemini 3.7 Flash and retrieval-grounded local Qwen3.8 in parallel, and atomically submits one complete answer only after the same card turns green.
+Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, uses reviewed history first, resolves genuinely new clues with Gemini 3.7 Flash and retrieval-grounded local Qwen3.8 in parallel, uses account-authenticated Antigravity Gemini 3.7 Low when the primary text resolvers cannot answer, and atomically submits one complete answer only after the same card turns green.
 
-Version 0.8.0 closes the failures proven by the 6 PM round. Slow inference no longer blocks the OCR/state thread, so a correct result survives the red-to-green transition instead of timing itself out. Ungrounded Gemini 3.7 Flash now runs beside local Qwen for text and cropped visual clues through a hard-deadline, structured-output provider; its key is read only from `GEMINI_API_KEY`. Answers stay in memory until green, then the complete value is committed to the exact empty composer in one UI Automation operation—partial prefixes such as the observed `Lego` can no longer be produced. Semantic bot reveals are now the primary learning path. The complete bot-confirmed 6 PM transcript expands reviewed history to 148 entries and the canonical answer catalog to 227.
+Version 0.9.0 adds the supported Antigravity headless CLI as a bounded text-only fallback under the workstation's cached Google account. This uses the Google account/AI-plan quota instead of silently trying to reuse the exhausted Gemini Developer API key. It runs only after all available primary resolvers abstain or are unavailable; it never becomes a second Gemini vote against Qwen, and a real provider disagreement still abstains. Each call has a six-second queue-plus-execution deadline, a fresh empty working directory, a minimal environment allowlist, disabled slash commands, sandboxing, bounded output, and Windows Job Object ownership so F12 kills the exact process tree before shutdown waits.
 
 ```text
 DXcam 60 FPS physical-pixel crop
@@ -11,7 +11,8 @@ DXcam 60 FPS physical-pixel crop
   -> Discord UI Automation semantic clue read
        -> reviewed 148-pair history (exact text + exact emoji)
        -> fuzzy text cache / strict pHash cache
-       -> unseen clue: concurrent Gemini 3.7 + hot Qwen3.8 retrieval/verifier
+       -> unseen clue: concurrent Gemini 3.7 API + hot Qwen3.8 retrieval/verifier
+       -> both primary text resolvers abstain/unavailable: Antigravity 3.7 Low
        -> visual clue: Gemini receives only the cropped clue image
        -> unresolved/low-confidence: no submission; wait for paired reveal
   -> claim one empty #💜anime-chat composer through UI Automation
@@ -29,6 +30,8 @@ DXcam 60 FPS physical-pixel crop
 - Semantic clue and reveal reads can now inspect the one unambiguous Discord window in the background without activating, focusing, or typing into it.
 - Novel Gemini/Qwen work runs outside the scene thread, so OCR continues to process readiness changes while models work.
 - Gemini 3.7 Flash is preflighted at startup, uses low thinking and strict structured output, performs no live retry or Search grounding, and fails closed without delaying local Qwen.
+- The optional Antigravity fallback is preflighted separately with cached account auth. It is intentionally text-only, stateless per clue, and fail-soft: missing auth, account quota, timeout, stale fingerprints, or malformed output cannot block the primary providers or reach Discord.
+- Antigravity is not automated through the IDE or consumer Gemini browser. The official headless CLI is the stable integration surface; the SDK still requires a Gemini API key and therefore is not the quota workaround.
 - Proof boundary for v0.8.0: real Gemini text generation is verified, while the replayed Q10 inline-image request was accepted by the provider path but Google returned a free-tier `RateLimitError`; live multimodal answer accuracy remains unproven until quota resets, and that lane fails closed meanwhile.
 - Replaced raw model guessing with retrieval-grounded Qwen3.8. Raw Qwen confidently missed several September 1 character clues; evidence retrieval plus verification resolved the five novel clues not promoted into history as Yuki Sohma, Dragon Ball Z, Akane Tsunemori, Initial D, and InuYasha in 3.4–3.7 seconds each.
 - The app owns a loopback-only llama.cpp Q6 server, warms it before capture, and stops only that owned process on F12/Ctrl+C. Q4 KV cache keeps combined OCR/model desktop usage near 27.2 GiB on the 32 GiB RTX 5090.
@@ -51,6 +54,7 @@ DXcam 60 FPS physical-pixel crop
 - `src/anime_trivia_automation/status_window.py` — passive top-right status panel using Windows no-activate/click-through styles.
 - `src/anime_trivia_automation/novel.py` — managed llama.cpp lifecycle, diverse retrieval, Qwen3.8 synthesis, verification, canonicalization, and per-session caching.
 - `src/anime_trivia_automation/gemini.py` — hard-deadline Gemini 3.7 structured text/image provider with secure key lookup and disabled-by-default Flash-Lite scout.
+- `src/anime_trivia_automation/antigravity.py` — account-authenticated, text-only Gemini 3.7 Low fallback with structured output, environment isolation, output bounds, absolute deadlines, and owned process-tree shutdown.
 - `src/anime_trivia_automation/knowledge.py` — read-only exact-quote and FTS5 access to the local source-attributed anime index.
 - `src/anime_trivia_automation/vlm.py` — experimental local-model resolver; live submission is disabled in config.
 - `data/trivia_history.seed.json` — 148 reviewed clue→answer pairs with explicit provenance on the September 1 noon and 6 PM entries.
@@ -73,7 +77,9 @@ Copy-Item .\config.example.json .\config.json
 
 The installed workstation config is already calibrated and should not be overwritten unless recalibrating. The Windows installer creates `.venv`, installs the checkout in editable mode, and uses the shared CUDA PyTorch runtime for PaddleOCR and the frame gate.
 
-The installed workstation config enables the `novel` lane and points at its verified Qwen3.8-27B Q6 GGUF plus pinned llama.cpp CUDA runtime. It also enables Gemini 3.7 when `GEMINI_API_KEY` is present in the user environment; the key is never stored in JSON or the repository. The portable example still requires its own key and local-model paths. The older in-process `vlm` lane remains disabled.
+The installed workstation config enables the `novel` lane and points at its verified Qwen3.8-27B Q6 GGUF plus pinned llama.cpp CUDA runtime. It also enables Gemini 3.7 when `GEMINI_API_KEY` is present in the user environment; the key is never stored in JSON or the repository. The workstation additionally enables the official Antigravity CLI at `%LOCALAPPDATA%\agy\bin\agy.exe` after account authentication. Run `agy models` once and confirm `gemini-3.7-flash-low` is listed before enabling the portable example's `antigravity` section. The older in-process `vlm` lane remains disabled.
+
+Antigravity child processes do not receive `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or unrelated parent credentials. They receive only the small OS/profile/path environment required to reach the CLI's existing account session. Account quotas can still be exhausted or changed by Google; that condition produces an abstention, never an API-key fallback or browser/IDE automation.
 
 ## Calibrate the capture region
 
@@ -119,7 +125,7 @@ Double-click `Start Anime Trivia.cmd`, or run:
 .\.venv\Scripts\anime-trivia.exe --config .\config.json
 ```
 
-It is safe to start early. Leave the launcher open and keep Anime Soul visible. The Gemini API is integrated, so normal operation no longer needs browser screenshot/paste work. Manual research remains available as a fallback; if another app is foreground when an answer resolves, the panel retains it until Discord returns. The app refuses Discord search, another channel, a nonempty editor, or an editor modified by a human.
+It is safe to start early. Leave the launcher open and keep Anime Soul visible. The Gemini API and account-authenticated text fallback are integrated, so normal operation no longer needs browser screenshot/paste work. Manual research remains available; if another app is foreground when an answer resolves, the panel retains it until Discord returns. The app refuses Discord search, another channel, a nonempty editor, or an editor modified by a human.
 
 Manual text always wins: if you have already begun typing in Discord, the app leaves it untouched and does not press Enter. `WAITING GREEN` means the answer exists only in memory and Discord is untouched. `DRAFTING` now means one complete value has been atomically staged after green and Enter is imminent; any divergent user edit blocks Enter without being erased. Press F12 at any time to stop.
 
@@ -144,9 +150,10 @@ Resolution order is:
 1. exact semantic history match (including emoji/ZWJ sequences);
 2. fuzzy verified-history/text match with threshold and runner-up margin;
 3. strict pHash match with Hamming-distance and ambiguity margins;
-4. concurrent ungrounded Gemini 3.7 structured resolution and retrieval-grounded Qwen3.8 verification;
-5. enabled providers finalize together; agreement or one answer plus abstention may submit, while differing answers always abstain;
-6. otherwise abstain.
+4. concurrent ungrounded Gemini 3.7 API structured resolution and retrieval-grounded Qwen3.8 verification;
+5. if all available primary text resolvers abstain or are unavailable, one account-authenticated Antigravity Gemini 3.7 Low fallback;
+6. primary providers finalize together; agreement or one high-confidence answer plus abstention may submit, while differing answers always abstain and correlated Gemini routes never double-vote;
+7. otherwise abstain.
 
 No novel model answer is written directly to the durable cache. It can serve only its current live round. A clue becomes durable only after the same round has progressed red/green→closed and the bot posts exactly one newly observed official reveal. Discord's semantic bot result is primary; spatial OCR is the fallback. Text and semantic clues are persisted atomically, and visual hashes are stored only from locked/ready frames.
 

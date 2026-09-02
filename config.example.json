@@ -134,6 +134,18 @@
     "max_clue_characters": 2000,
     "max_image_bytes": 4000000
   },
+  "antigravity": {
+    "enabled": false,
+    "executable": "%LOCALAPPDATA%/agy/bin/agy.exe",
+    "model_slug": "gemini-3.7-flash-low",
+    "working_root": "runtime/antigravity",
+    "preflight_timeout_seconds": 8.0,
+    "total_timeout_seconds": 6.0,
+    "min_confidence": 0.9,
+    "max_answer_characters": 96,
+    "max_clue_characters": 2000,
+    "max_stdout_bytes": 262144
+  },
   "typing": {
     "enabled": true,
     "expected_process_names": ["Discord.exe"],
