@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import sys
@@ -200,23 +199,23 @@ class AntigravityProviderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "agy.exe"
             executable.write_bytes(b"versioned signed CLI fixture")
-            digest = hashlib.sha256(executable.read_bytes()).hexdigest().upper()
             config = load_config("config.example.json")
             installed = replace(
                 config.antigravity,
                 enabled=True,
                 executable=executable,
-                executable_sha256=digest,
             )
 
-            validate_config(replace(config, antigravity=installed))
-            with self.assertRaisesRegex(ValueError, "failed SHA-256 verification"):
-                validate_config(
-                    replace(
-                        config,
-                        antigravity=replace(installed, executable_sha256="0" * 64),
-                    )
-                )
+            with patch(
+                "anime_trivia_automation.config._is_valid_google_signed_executable",
+                return_value=True,
+            ):
+                validate_config(replace(config, antigravity=installed))
+            with patch(
+                "anime_trivia_automation.config._is_valid_google_signed_executable",
+                return_value=False,
+            ), self.assertRaisesRegex(ValueError, "valid Google LLC signature"):
+                validate_config(replace(config, antigravity=installed))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "source": "Available Anime Soul question cards paired with dated bot reveals or accepted live submissions; unverified manual search answers are excluded",
-  "captured_utc": "2026-09-02T01:05:00Z",
+  "source": "Anime Soul bot reveals, accepted-live correlations, and per-row labeled user-capture cross-checks; only rows marked bot-reveal are bot-confirmed",
+  "captured_utc": "2026-09-02T14:05:00Z",
   "pairs": [
     {"clue": "\"Sometimes living can be hard, but it's only because we're alive that we can make each other laugh, cry, and be happy.\"", "type": "anime_title", "answer": "Fruits Basket"},
     {"clue": "🏍️ 💊 🏙️ 💥", "type": "anime_title", "answer": "Akira"},

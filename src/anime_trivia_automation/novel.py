@@ -447,10 +447,18 @@ class NovelAnswerResolver:
                         ranked_alternatives.pop(index)
                         ranked_alternatives.insert(0, (previous, False))
                         break
-                # A guess that no local/web record echoes is still worth typing:
-                # wrong guesses cost nothing, silence costs the round. The
-                # detail records whether evidence backed it.
-                alternatives = [item[0] for item in ranked_alternatives]
+                if not evidence_hit:
+                    self._record_elapsed(
+                        started,
+                        confidence,
+                        "no ranked candidate matched independent evidence",
+                    )
+                    return None
+                alternatives = [
+                    alternative
+                    for alternative, alternative_hit in ranked_alternatives
+                    if alternative_hit
+                ]
                 detail = (
                     f"ranked from {len(evidence)} local/web records; "
                     f"canonical evidence {'matched' if evidence_hit else 'not matched'}"

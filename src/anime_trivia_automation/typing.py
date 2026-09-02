@@ -1269,8 +1269,6 @@ class SafeKeyboardExecutor:
             event_id=f"{event_token}:guess{task.guess_index}",
             increment="submitted",
         )
-        self._restore_foreground()
-
         if composer is not None:
             try:
                 deadline = time.monotonic() + 0.35
@@ -1278,6 +1276,8 @@ class SafeKeyboardExecutor:
                     time.sleep(0.01)
                 cleared = composer.value() == ""
             except Exception:
+                self._remember_orphan(answer)
+                self._restore_foreground()
                 LOGGER.warning(
                     "Enter was sent and the Discord editor re-rendered; "
                     "suppressing any duplicate submission",
@@ -1294,6 +1294,8 @@ class SafeKeyboardExecutor:
                 )
                 return True
             if not cleared:
+                self._clear_or_remember(composer, answer)
+                self._restore_foreground()
                 LOGGER.warning(
                     "Enter was sent but Discord did not clear within 350ms; "
                     "suppressing any duplicate submission"
@@ -1308,6 +1310,7 @@ class SafeKeyboardExecutor:
                     readiness="ready",
                 )
                 return True
+        self._restore_foreground()
         LOGGER.info(
             "Enter dispatched and composer cleared [%s] %s -> %s",
             task.source,

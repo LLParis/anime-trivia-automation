@@ -159,12 +159,11 @@
   "antigravity": {
     "enabled": false,
     "executable": "%LOCALAPPDATA%/agy/bin/agy.exe",
-    "executable_sha256": "BFFA9C1227A517D0DBD7DDFC71A64BF6473C52FAB95369CABE09FF42BD9B3B3E",
     "model_slug": "gemini-3.7-flash-low",
     "working_root": "runtime/antigravity",
     "preflight_timeout_seconds": 8.0,
     "total_timeout_seconds": 8.0,
-    "min_confidence": 0.35,
+    "min_confidence": 0.75,
     "max_answer_characters": 96,
     "max_clue_characters": 2000,
     "max_stdout_bytes": 262144
@@ -199,7 +198,7 @@
     "activation_idle_ms": 350,
     "restore_previous_foreground": true,
     "max_guesses_per_round": 3,
-    "guess_gap_seconds": 1.5
+    "guess_gap_seconds": 5.2
   },
   "status": {
     "enabled": true,

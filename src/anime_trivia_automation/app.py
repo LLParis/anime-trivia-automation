@@ -151,9 +151,9 @@ class AnimeTriviaAutomation:
             max_workers=3,
             thread_name_prefix="trivia-resolver",
         )
-        # No more than six provider calls can be running or waiting. A normal
-        # round submits at most local Qwen plus Gemini, so this covers a whole
-        # live card transition without permitting an unbounded executor queue.
+        # No more than six provider calls can be running or waiting. This
+        # covers a whole live card transition without permitting an unbounded
+        # executor queue.
         self._resolution_slots = threading.BoundedSemaphore(6)
         self._provider_locks: dict[str, Any] = {
             "qwen": threading.Lock(),
@@ -695,14 +695,14 @@ class AnimeTriviaAutomation:
             and self._gemini.availability.available
             and not self._gemini.rate_limited
         )
-        # Account-auth Gemini 3.7 is the measured low-latency primary for any
-        # clue Discord exposes semantically, including emoji sequences. Local
-        # Qwen is retained as a secondary only when this lane abstains or is
-        # unavailable. The rate-limited API remains a raw-image fallback.
+        # Account-auth Gemini 3.7 is the measured primary for any clue Discord
+        # exposes semantically, including emoji sequences. Never race a second,
+        # lower-accuracy provider into Discord ahead of it. The rate-limited API
+        # remains a raw-image fallback when explicitly enabled.
         if semantic_clue:
             if antigravity_ready:
                 providers.add("antigravity")
-            if self._config.novel.enabled and self._novel.ready_for_resolve:
+            elif self._config.novel.enabled and self._novel.ready_for_resolve:
                 providers.add("qwen")
             if not providers and gemini_ready:
                 providers.add("gemini")
@@ -757,7 +757,7 @@ class AnimeTriviaAutomation:
         )
         self._resolution_rounds[key] = state
         if not providers:
-            if self._maybe_start_antigravity_fallback(
+            if self._advance_empty_route(
                 state, reason="No primary resolver is currently available"
             ):
                 return state
@@ -842,20 +842,31 @@ class AnimeTriviaAutomation:
                 if provider == "qwen":
                     source = "qwen38-retrieval-consensus"
                     if (
+                        self._active_resolution_key != request.key
+                        or self._active_status_token != request.round_token
+                        or self._active_status_closed
+                        or not self._active_prompt.is_open(
+                            request.signature, request.clue_fingerprint
+                        )
+                    ):
+                        error = "stale"
+                        detail = "Qwen request became stale before launch"
+                    elif (
                         time.perf_counter()
                         >= request.started_at
                         + float(self._config.novel.total_timeout_seconds)
                     ):
                         raise TimeoutError("local resolver request expired in queue")
-                    ranked = self._novel.resolve_ranked(
-                        request.clue,
-                        request.observation.expected_answer_type,
-                    )
-                    if ranked is not None:
-                        answer = ranked.answer
-                        alternatives = ranked.alternatives
-                    confidence = self._novel.last_confidence
-                    detail = self._novel.last_detail
+                    else:
+                        ranked = self._novel.resolve_ranked(
+                            request.clue,
+                            request.observation.expected_answer_type,
+                        )
+                        if ranked is not None:
+                            answer = ranked.answer
+                            alternatives = ranked.alternatives
+                        confidence = self._novel.last_confidence
+                        detail = self._novel.last_detail
                 elif provider == "gemini":
                     source = "gemini-3.7-structured"
                     gemini_result = self._resolve_with_gemini(request)
@@ -1064,12 +1075,13 @@ class AnimeTriviaAutomation:
             return
         state.pending.remove(result.provider)
         state.results[result.provider] = result
-        if result.provider == "antigravity" and result.error == "stale":
-            state.results.pop("antigravity", None)
-            state.providers.discard("antigravity")
-            state.fallback_started = False
-            self._maybe_start_antigravity_fallback(
-                state, reason="The clue returned after a stale queued fallback"
+        if result.provider in {"antigravity", "qwen"} and result.error == "stale":
+            state.results.pop(result.provider, None)
+            state.providers.discard(result.provider)
+            if result.provider == "antigravity":
+                state.fallback_started = False
+            self._advance_empty_route(
+                state, reason="The clue returned after stale queued work"
             )
             return
         if (
@@ -1088,8 +1100,9 @@ class AnimeTriviaAutomation:
                 self._resolution_rounds.pop(result.key, None)
             return
 
-        # A wrong guess costs nothing in Anime Soul, while waiting for the
-        # slowest provider costs the round. The first answer to arrive is
+        # A wrong guess triggers Discord's five-second slowmode, while waiting
+        # for the slowest provider can also lose the round. The first verified
+        # answer to arrive is
         # queued immediately; every later distinct answer (from another
         # provider or from a provider's own alternatives) becomes a follow-up
         # guess that the dispatcher spaces out while the card stays green.
@@ -1111,18 +1124,10 @@ class AnimeTriviaAutomation:
             self._queue_resolution_candidate(state)
         if state.pending:
             return
-        if not state.guesses:
-            if (
-                "antigravity" in state.providers
-                and self._maybe_start_qwen_fallback(
-                    state, reason="Antigravity abstained or was unavailable"
-                )
-            ):
-                return
-            if self._maybe_start_antigravity_fallback(
-                state, reason="Primary resolvers abstained or were unavailable"
-            ):
-                return
+        if not state.guesses and self._advance_empty_route(
+            state, reason="The attempted resolver abstained or was unavailable"
+        ):
+            return
         self._emit_unknown_if_complete(state)
 
     def _add_resolution_guesses(
@@ -1308,6 +1313,23 @@ class AnimeTriviaAutomation:
         self._submit_resolution_provider("qwen", fallback_request)
         return True
 
+    def _advance_empty_route(
+        self, state: AsyncResolutionRound, *, reason: str
+    ) -> bool:
+        """Advance one no-answer round without skipping a resumed fingerprint."""
+
+        if state.pending or state.guesses:
+            return False
+        if "antigravity" not in state.providers and self._maybe_start_antigravity_fallback(
+            state, reason=reason
+        ):
+            return True
+        if "qwen" not in state.providers and self._maybe_start_qwen_fallback(
+            state, reason=reason
+        ):
+            return True
+        return False
+
     def _queue_resolution_candidate(self, state: AsyncResolutionRound) -> bool:
         """Queue every not-yet-queued guess for the still-live round."""
 
@@ -1418,8 +1440,8 @@ class AnimeTriviaAutomation:
             )
         ):
             return
-        if self._maybe_start_antigravity_fallback(
-            state, reason="Primary resolvers completed while this clue was inactive"
+        if self._advance_empty_route(
+            state, reason="A completed clue became active again"
         ):
             return
         state.unknown_emitted = True
@@ -1865,7 +1887,7 @@ class AnimeTriviaAutomation:
 
     def run(self) -> None:
         LOGGER.info(
-            "Starting Anime Trivia Automation%s with Gemini 3.7 API, local Qwen, and the account fallback. Keep Anime Soul visible; manual research remains available. Press %s to stop.",
+            "Starting Anime Trivia Automation%s with reviewed history and the configured production resolver. Keep Anime Soul visible; manual research remains available. Press %s to stop.",
             " in DRY RUN mode" if not self._config.typing.enabled else "",
             self._config.typing.stop_key.upper(),
         )

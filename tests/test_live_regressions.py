@@ -214,6 +214,16 @@ class AmbiguousEnterController(FakeController):
         super().press(key)
 
 
+class StickyEnterController(FakeController):
+    """Simulate Discord rejecting Enter and leaving the exact draft behind."""
+
+    def press(self, key: object) -> None:
+        if key == self.enter_key:
+            self.entered = True
+            return
+        super().press(key)
+
+
 class RecordingStatus:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict]] = []
@@ -1336,6 +1346,34 @@ class LiveRegressionTests(unittest.TestCase):
         ):
             self.assertTrue(executor.execute(task))
         self.assertTrue(executor._controller.entered)
+
+    def test_rejected_enter_clears_owned_draft_before_next_round(self) -> None:
+        active = ActivePromptState()
+        signature = "round:anime_title:1/10"
+        active.update(signature, "ready", 1, "text:known")
+        composer = FakeComposer()
+        executor = make_executor(active, composer)
+        executor._controller = StickyEnterController(composer, executor._enter_key)
+        task = AnswerTask(
+            answer="Fruits Basket",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="1/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="history-cache",
+            round_token="session-1:round-1",
+            clue_fingerprint="text:known",
+        )
+
+        with self.assertLogs(
+            "anime_trivia_automation.typing", level="WARNING"
+        ):
+            self.assertTrue(executor.execute(task))
+
+        self.assertTrue(executor._controller.entered)
+        self.assertEqual(composer.text, "")
+        self.assertIsNone(executor._orphaned_draft)
 
     def test_orphan_cleanup_targets_owned_editor_without_keyboard_shortcuts(self) -> None:
         active = ActivePromptState()

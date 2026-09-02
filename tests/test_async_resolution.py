@@ -79,7 +79,7 @@ def make_async_app(signature: str, fingerprint: str, round_token: str):
 
 
 class AsyncResolutionTests(unittest.TestCase):
-    def test_semantic_emoji_races_account_and_grounded_local_providers(self) -> None:
+    def test_semantic_emoji_uses_account_provider_without_double_voting(self) -> None:
         signature = "round:anime_title:3/10"
         app, state = make_async_app(
             signature,
@@ -106,7 +106,7 @@ class AsyncResolutionTests(unittest.TestCase):
             state.request.observation, "🐉 ♨️ 👻 🐖"
         )
 
-        self.assertEqual(providers, {"antigravity", "qwen"})
+        self.assertEqual(providers, {"antigravity"})
 
     def test_raw_visual_uses_only_image_gemini(self) -> None:
         signature = "round:anime_title:3/10"
@@ -292,7 +292,7 @@ class AsyncResolutionTests(unittest.TestCase):
         state.pending = {"gemini", "qwen"}
 
         # Gemini answers first: it is queued right away, without waiting for
-        # the slower local provider (a wrong guess is free, a late one loses).
+        # the slower local provider. Follow-ups remain slowmode-spaced.
         app._accept_resolution_result(
             ProviderResolution(
                 key=state.request.key,
@@ -460,6 +460,62 @@ class AsyncResolutionTests(unittest.TestCase):
 
         self.assertEqual(result.error, "stale")
         self.assertEqual(calls, [])
+
+    def test_queued_qwen_revalidates_fingerprint_before_model_launch(self) -> None:
+        signature = "round:anime_title:1/10"
+        fingerprint_a = "text:stable clue a"
+        fingerprint_b = "text:corrected clue b"
+        round_token = "session-1:round-1:1/10"
+        app, state = make_async_app(signature, fingerprint_a, round_token)
+        app._active_resolution_key = (round_token, fingerprint_b)
+        app._provider_locks = {"qwen": threading.Lock()}
+        app._config.novel = SimpleNamespace(total_timeout_seconds=8.0)
+        calls: list[str] = []
+        app._novel = SimpleNamespace(
+            resolve_ranked=lambda *_args: calls.append("called"),
+            last_confidence=0.0,
+            last_detail="",
+        )
+
+        result = app._run_resolution_provider("qwen", state.request)
+
+        self.assertEqual(result.error, "stale")
+        self.assertEqual(calls, [])
+
+    def test_returning_fingerprint_advances_from_antigravity_to_qwen(self) -> None:
+        signature = "round:character:5/10"
+        fingerprint_a = "text:elias clue"
+        fingerprint_b = "text:temporary ocr"
+        round_token = "session-1:round-5:5/10"
+        app, state = make_async_app(signature, fingerprint_a, round_token)
+        state.providers = {"antigravity"}
+        state.pending = {"antigravity"}
+        state.fallback_started = True
+        app._config.novel = SimpleNamespace(enabled=True)
+        app._active_resolution_key = (round_token, fingerprint_b)
+        submitted: list[str] = []
+        app._submit_resolution_provider = (  # type: ignore[method-assign]
+            lambda provider, _request: submitted.append(provider)
+        )
+
+        app._accept_resolution_result(
+            ProviderResolution(
+                key=state.request.key,
+                provider="antigravity",
+                source="antigravity-account-3.7-low",
+                answer=None,
+                confidence=0.0,
+                elapsed_ms=8000.0,
+            )
+        )
+        self.assertEqual(submitted, [])
+
+        app._active_resolution_key = state.request.key
+        app._active_prompt.update(signature, "locked", 3, fingerprint_a)
+        app._emit_unknown_if_complete(state)
+
+        self.assertEqual(submitted, ["qwen"])
+        self.assertEqual(state.pending, {"qwen"})
 
     def test_antigravity_fallback_is_not_spent_when_primaries_answered(self) -> None:
         signature = "round:anime_title:1/10"

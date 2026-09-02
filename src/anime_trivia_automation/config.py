@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
 import re
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,9 +12,6 @@ from typing import Any
 from urllib.parse import urlsplit
 
 Region = tuple[int, int, int, int]
-_ANTIGRAVITY_1_1_23_SHA256 = (
-    "BFFA9C1227A517D0DBD7DDFC71A64BF6473C52FAB95369CABE09FF42BD9B3B3E"
-)
 
 
 def _default_antigravity_executable() -> Path:
@@ -22,6 +19,76 @@ def _default_antigravity_executable() -> Path:
     if local_app_data:
         return Path(local_app_data) / "agy" / "bin" / "agy.exe"
     return Path("agy.exe")
+
+
+def _is_valid_google_signed_executable(path: Path) -> bool:
+    """Accept Antigravity updates only when Windows validates Google signing."""
+
+    if os.name != "nt":
+        return False
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    powershell = (
+        Path(system_root)
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    if not powershell.is_file():
+        return False
+    script = (
+        "$signature=Get-AuthenticodeSignature -LiteralPath $env:ANIME_TRIVIA_AGY_PATH;"
+        "[pscustomobject]@{status=[string]$signature.Status;"
+        "subject=[string]$signature.SignerCertificate.Subject}|ConvertTo-Json -Compress"
+    )
+    child_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.casefold()
+        in {
+            "comspec",
+            "path",
+            "pathext",
+            "systemdrive",
+            "systemroot",
+            "temp",
+            "tmp",
+            "windir",
+        }
+    }
+    child_env["ANIME_TRIVIA_AGY_PATH"] = str(path)
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        completed = subprocess.run(
+            [
+                str(powershell),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            env=child_env,
+            timeout=6.0,
+            shell=False,
+            creationflags=creationflags,
+        )
+        if completed.returncode != 0:
+            return False
+        payload = json.loads(completed.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired, UnicodeError, json.JSONDecodeError):
+        return False
+    subject = str(payload.get("subject", "")).casefold()
+    return (
+        str(payload.get("status", "")).casefold() == "valid"
+        and "cn=google llc" in subject
+        and "o=google llc" in subject
+    )
 
 
 def _region(
@@ -229,12 +296,11 @@ class AntigravityConfig:
 
     enabled: bool = False
     executable: Path = field(default_factory=_default_antigravity_executable)
-    executable_sha256: str = _ANTIGRAVITY_1_1_23_SHA256
     model_slug: str = "gemini-3.7-flash-low"
     working_root: Path = Path("runtime/antigravity")
     preflight_timeout_seconds: float = 8.0
     total_timeout_seconds: float = 8.0
-    min_confidence: float = 0.35
+    min_confidence: float = 0.75
     max_answer_characters: int = 96
     max_clue_characters: int = 2000
     max_stdout_bytes: int = 262_144
@@ -268,10 +334,10 @@ class TypingConfig:
     auto_activate_discord: bool = True
     activation_idle_ms: int = 350
     restore_previous_foreground: bool = True
-    # Wrong guesses cost nothing in Anime Soul, so a round may receive up to
-    # this many distinct answers, spaced by the gap, while it stays green.
+    # Discord slowmode applies after every guess, so distinct follow-ups must
+    # be spaced by at least five seconds while the card remains green.
     max_guesses_per_round: int = 3
-    guess_gap_seconds: float = 1.5
+    guess_gap_seconds: float = 5.2
 
 
 @dataclass(frozen=True)
@@ -549,7 +615,7 @@ def load_config(path: str | Path) -> AppConfig:
             typing_raw.get("restore_previous_foreground", True)
         ),
         max_guesses_per_round=int(typing_raw.get("max_guesses_per_round", 3)),
-        guess_gap_seconds=float(typing_raw.get("guess_gap_seconds", 1.5)),
+        guess_gap_seconds=float(typing_raw.get("guess_gap_seconds", 5.2)),
     )
 
     status = StatusConfig(
@@ -673,11 +739,6 @@ def load_config(path: str | Path) -> AppConfig:
     antigravity = AntigravityConfig(
         enabled=bool(antigravity_raw.get("enabled", False)),
         executable=resolve_local(os.path.expandvars(str(antigravity_executable))),
-        executable_sha256=str(
-            antigravity_raw.get(
-                "executable_sha256", _ANTIGRAVITY_1_1_23_SHA256
-            )
-        ).upper(),
         model_slug=str(
             antigravity_raw.get("model_slug", "gemini-3.7-flash-low")
         ),
@@ -691,7 +752,7 @@ def load_config(path: str | Path) -> AppConfig:
             antigravity_raw.get("total_timeout_seconds", 8.0)
         ),
         min_confidence=float(
-            antigravity_raw.get("min_confidence", 0.35)
+            antigravity_raw.get("min_confidence", 0.75)
         ),
         max_answer_characters=int(
             antigravity_raw.get("max_answer_characters", 96)
@@ -1014,14 +1075,10 @@ def validate_config(config: AppConfig) -> None:
     if config.antigravity.enabled:
         if not config.antigravity.executable.is_file():
             raise ValueError("antigravity.executable is missing")
-        if not re.fullmatch(r"[0-9A-F]{64}", config.antigravity.executable_sha256):
-            raise ValueError("antigravity.executable_sha256 must be 64 hex characters")
-        executable_hash = hashlib.sha256()
-        with config.antigravity.executable.open("rb") as executable_handle:
-            for block in iter(lambda: executable_handle.read(1024 * 1024), b""):
-                executable_hash.update(block)
-        if executable_hash.hexdigest().upper() != config.antigravity.executable_sha256:
-            raise ValueError("antigravity.executable failed SHA-256 verification")
+        if not _is_valid_google_signed_executable(config.antigravity.executable):
+            raise ValueError(
+                "antigravity.executable must have a valid Google LLC signature"
+            )
         if config.antigravity.model_slug != "gemini-3.7-flash-low":
             raise ValueError(
                 "antigravity.model_slug must be 'gemini-3.7-flash-low'"
@@ -1105,8 +1162,8 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("typing.activation_idle_ms must be between 0 and 5000")
     if not 1 <= config.typing.max_guesses_per_round <= 5:
         raise ValueError("typing.max_guesses_per_round must be between 1 and 5")
-    if not 0.0 <= config.typing.guess_gap_seconds <= 10.0:
-        raise ValueError("typing.guess_gap_seconds must be between 0 and 10")
+    if not 5.0 <= config.typing.guess_gap_seconds <= 10.0:
+        raise ValueError("typing.guess_gap_seconds must be between 5 and 10")
     if config.status.width < 360 or config.status.height < 220:
         raise ValueError("status panel dimensions are too small")
     if config.status.margin_x < 0 or config.status.margin_y < 0:

@@ -58,7 +58,7 @@ class NovelAnswerResolverTests(unittest.TestCase):
 
             assert ranked is not None
             self.assertEqual(ranked.answer, "Elias Ainsworth")
-            self.assertEqual(ranked.alternatives, ("Cham",))
+            self.assertEqual(ranked.alternatives, ())
 
     def test_endpoint_validation_rejects_loopback_userinfo_spoof(self) -> None:
         config = AppConfig(
@@ -139,8 +139,8 @@ class NovelAnswerResolverTests(unittest.TestCase):
                 second = resolver.resolve('"Dedicate your hearts!"', "anime_title")
             assert first is not None
             self.assertEqual(first.answer, "Attack on Titan")
-            # Alternatives are canonicalized and deduplicated against the answer.
-            self.assertEqual(first.alternatives, ("Girls' Last Tour",))
+            # Ungrounded alternatives are not allowed to consume slowmode.
+            self.assertEqual(first.alternatives, ())
             self.assertEqual(second, "Attack on Titan")
             self.assertEqual(synthesize.call_count, 2)
 
@@ -230,6 +230,27 @@ class NovelAnswerResolverTests(unittest.TestCase):
             ):
                 self.assertFalse(resolver.ensure_ready())
         self.assertIn("unowned process", resolver.last_detail)
+
+    def test_high_confidence_without_independent_evidence_abstains(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            resolver = self.make_resolver(directory)
+            with (
+                mock.patch.object(resolver, "_plan_queries", return_value=["one", "two"]),
+                mock.patch.object(resolver, "_search_web", return_value=[]),
+                mock.patch.object(
+                    resolver,
+                    "_synthesize",
+                    return_value={
+                        "answer": "Confident Fabrication",
+                        "alternatives": [],
+                        "confidence": 0.99,
+                    },
+                ),
+            ):
+                ranked = resolver.resolve_ranked("an ambiguous clue", "character")
+
+            self.assertIsNone(ranked)
+            self.assertIn("independent evidence", resolver.last_detail)
 
     def test_untyped_web_title_cannot_validate_a_character_answer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

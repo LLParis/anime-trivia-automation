@@ -17,12 +17,11 @@ if not exist "config.json" (
   exit /b 1
 )
 
-echo Loading local OCR, reviewed history, account Gemini 3.7 (Antigravity), and local Qwen3.8. Capture starts after ARMED.
-echo Any red or green card is answered, even if you start mid-quiz. First answer types at green;
-echo different answers from other solvers follow as extra guesses while the card stays green.
+echo Loading local OCR, reviewed history, and account Gemini 3.7 (Antigravity). Capture starts after ARMED.
+echo Any current red or green card can be handled, even if you start mid-quiz.
+echo A verified answer types only after the same card turns green.
 echo If Chrome is in front when the card turns green, Discord is raised once you pause typing,
-echo the answer is sent, and focus returns to Chrome. Log + ledger: runtime\logs, runtime
-ound_ledger.jsonl.
+echo the answer is sent, and focus returns to Chrome. Log + ledger: runtime\logs, runtime\round_ledger.jsonl.
 echo Press F12 to stop.
 echo.
 ".venv\Scripts\anime-trivia.exe" --config "config.json"
