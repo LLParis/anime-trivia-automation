@@ -262,6 +262,9 @@ class AnimeTriviaAutomation:
         self, observation: PromptObservation, *, live: bool
     ) -> tuple[str, bool]:
         clue_key = self._status_clue_key(observation)
+        footerless_visual_continuation = (
+            live and self._is_footerless_visual_continuation(observation)
+        )
         same_round = False
         if self._active_status_token is not None and not self._active_status_closed:
             if observation.question_label and self._active_status_question_label:
@@ -275,8 +278,13 @@ class AnimeTriviaAutomation:
                 same_round = clue_key == self._active_status_clue_key
             elif not observation.question_label and self._active_status_question_label:
                 # Likewise, tolerate a transient footer miss after the card's
-                # stable numbered identity has already been established.
-                same_round = clue_key == self._active_status_clue_key
+                # stable numbered identity has already been established. The
+                # visual crop and pHash can move drastically when the footer is
+                # absent, so the pending labeled transaction is authoritative.
+                same_round = (
+                    clue_key == self._active_status_clue_key
+                    or footerless_visual_continuation
+                )
             else:
                 same_round = observation.signature == self._active_status_signature
 
@@ -292,10 +300,15 @@ class AnimeTriviaAutomation:
             self._active_status_closed = False
             return self._active_status_token, True
         if same_round and self._active_status_token is not None:
-            self._active_status_signature = observation.signature
+            # Do not let one unlabeled visual jitter replace the stronger
+            # labeled identity that anchored this physical card.
+            preserve_labeled_identity = footerless_visual_continuation
+            if not preserve_labeled_identity:
+                self._active_status_signature = observation.signature
             if observation.question_label:
                 self._active_status_question_label = observation.question_label
-            self._active_status_clue_key = clue_key
+            if not preserve_labeled_identity:
+                self._active_status_clue_key = clue_key
             return self._active_status_token, False
         return (
             f"session-{self._status_session_id}:untracked:{observation.signature}",
@@ -343,15 +356,42 @@ class AnimeTriviaAutomation:
         """Keep one visual identity across red/green crop and border jitter."""
 
         fingerprint = self._clue_fingerprint(observation)
-        pending = self._pending_round
+        pending = getattr(self, "_pending_round", None)
         if (
             observation.prompt_kind == "visual"
             and pending is not None
-            and pending.signature == observation.signature
-            and pending.question_label == observation.question_label
+            and (
+                (
+                    pending.signature == observation.signature
+                    and pending.question_label == observation.question_label
+                )
+                or self._is_footerless_visual_continuation(observation)
+            )
         ):
             return pending.clue_fingerprint
         return fingerprint
+
+    def _is_footerless_visual_continuation(
+        self, observation: PromptObservation
+    ) -> bool:
+        """Recognize a labeled visual card whose footer vanished temporarily.
+
+        A ready-to-locked transition is still a hard new-round boundary. This
+        lets any number of consecutive footer-missed frames retain the labeled
+        token without relying on a crop-sensitive pHash distance.
+        """
+
+        pending = getattr(self, "_pending_round", None)
+        return bool(
+            pending is not None
+            and not observation.question_label
+            and getattr(observation, "prompt_kind", None) == "visual"
+            and getattr(observation, "readiness", None) in {"locked", "ready"}
+            and getattr(observation, "expected_answer_type", None)
+            == pending.expected_answer_type
+            and self._active_status_question_label == pending.question_label
+            and not (pending.saw_ready and observation.readiness == "locked")
+        )
 
     @staticmethod
     def _canonical_text_clue(clue: str) -> str:
@@ -525,12 +565,15 @@ class AnimeTriviaAutomation:
             if self._quiz_ended:
                 return
             if not self._dispatcher.observe_prompt(
-                observation.signature,
+                round_token,
                 "closed",
                 scene.generation,
                 self._clue_fingerprint(observation),
             ):
                 return
+            self._reconcile_retired_dispatch_tasks(
+                round_token, self._clue_fingerprint(observation)
+            )
             active_round_closed = self._active_status_token == round_token
             if active_round_closed:
                 self._status.emit(
@@ -564,6 +607,7 @@ class AnimeTriviaAutomation:
         if (
             self._pending_round is not None
             and self._pending_round.signature != observation.signature
+            and not self._is_footerless_visual_continuation(observation)
         ):
             LOGGER.info(
                 "Expired unlearned visual transaction for %s",
@@ -583,12 +627,13 @@ class AnimeTriviaAutomation:
         live_clue = self._display_clue(observation)
         clue_fingerprint = self._stable_live_clue_fingerprint(observation)
         if not self._dispatcher.observe_prompt(
-            observation.signature,
+            round_token,
             observation.readiness,
             scene.generation,
             clue_fingerprint,
         ):
             return
+        self._reconcile_retired_dispatch_tasks(round_token, clue_fingerprint)
         self._active_resolution_key = (round_token, clue_fingerprint)
         if self._ephemeral_answer is not None and (
             self._ephemeral_answer[0] != observation.signature
@@ -755,7 +800,10 @@ class AnimeTriviaAutomation:
         request = ResolutionRequest(
             key=key,
             round_token=round_token,
-            signature=observation.signature,
+            # ActivePromptState is the typing gate, so its identity must be the
+            # unique logical round rather than the reusable card shape.  Keep
+            # observation.signature untouched for cache/reveal continuity.
+            signature=round_token,
             clue_fingerprint=clue_fingerprint,
             clue=clue,
             observation=observation,
@@ -1219,11 +1267,11 @@ class AnimeTriviaAutomation:
         first = state.guesses[0]
         assert first.answer is not None
         if self._ephemeral_answer is None or self._ephemeral_answer[0:2] != (
-            state.request.signature,
+            state.request.observation.signature,
             state.request.clue_fingerprint,
         ):
             self._ephemeral_answer = (
-                state.request.signature,
+                state.request.observation.signature,
                 state.request.clue_fingerprint,
                 first.answer,
                 first.source,
@@ -1432,7 +1480,7 @@ class AnimeTriviaAutomation:
             self._active_status_token != round_token
             or self._active_status_closed
             or not self._active_prompt.is_open(
-                observation.signature, clue_fingerprint
+                round_token, clue_fingerprint
             )
         ):
             return False
@@ -1445,7 +1493,7 @@ class AnimeTriviaAutomation:
         }
         task = AnswerTask(
             answer=answer,
-            prompt_signature=observation.signature,
+            prompt_signature=round_token,
             expected_answer_type=observation.expected_answer_type,
             question_label=observation.question_label,
             detected_at=detected_at,
@@ -1514,6 +1562,21 @@ class AnimeTriviaAutomation:
                     state.retired = True
                 else:
                     self._resolution_rounds.pop(key, None)
+
+    def _reconcile_retired_dispatch_tasks(
+        self, active_round_token: str, active_clue_fingerprint: str
+    ) -> None:
+        """Release app-side queue claims retired by the latest prompt update."""
+
+        for state in self._resolution_rounds.values():
+            if (
+                state.request.signature == active_round_token
+                and state.request.clue_fingerprint == active_clue_fingerprint
+            ):
+                continue
+            if state.queued_answers:
+                state.queued_answers.clear()
+                state.queued = False
 
     def _finish_quiz(self) -> None:
         if self._quiz_ended:
@@ -1692,6 +1755,12 @@ class AnimeTriviaAutomation:
         self, observation: PromptObservation, full_scene: Scene
     ) -> None:
         if not observation.question_label:
+            if (
+                observation.readiness == "ready"
+                and self._is_footerless_visual_continuation(observation)
+                and self._pending_round is not None
+            ):
+                self._pending_round.saw_ready = True
             return
         clue = observation.hint_text
         semantic_clue = False
@@ -2090,7 +2159,11 @@ def inspect_image(
         raise FileNotFoundError(f"Could not read image: {image_path}")
 
     ocr = PaddleOCREngine(config.ocr)
-    extractor = PromptExtractor(config.prompt, config.matching, config.readiness)
+    # Saved screenshots are often cropped tightly enough to omit the vertical
+    # outline. Offline inspection may use the card's explicit Answer Now / Get
+    # Ready text; the live writer still requires the production green outline.
+    offline_readiness = replace(config.readiness, allow_text_only_ready=True)
+    extractor = PromptExtractor(config.prompt, config.matching, offline_readiness)
     cache = TriviaCache(
         config.runtime.cache_path,
         config.matching,

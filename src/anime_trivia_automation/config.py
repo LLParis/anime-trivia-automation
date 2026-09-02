@@ -324,10 +324,12 @@ class TypingConfig:
     enter_after_open_slack_seconds: float = 0.06
     max_answer_characters: int = 96
     stop_key: str = "f12"
-    # How the complete answer reaches the Slate composer once the card is
-    # green. ``type`` sends real keystrokes (proven live against Discord);
-    # ``uia`` uses the UI Automation ValuePattern write.
-    composer_write_mode: str = "type"
+    # The answer reaches Discord as one complete UI Automation ValuePattern
+    # write. Character-at-a-time injection is intentionally not a live option:
+    # Discord's Slate accessibility value can lag the visible editor and leave
+    # an orphaned one-character prefix.
+    composer_write_mode: str = "uia"
+    composer_settle_timeout_seconds: float = 0.25
     # When another app (Chrome/Gemini) is foreground at green, bring the one
     # Discord window forward ourselves once the operator has been input-idle
     # for this long, then hand focus back after Enter.
@@ -607,8 +609,11 @@ def load_config(path: str | Path) -> AppConfig:
         max_answer_characters=int(typing_raw.get("max_answer_characters", 96)),
         stop_key=str(typing_raw.get("stop_key", "f12")).casefold(),
         composer_write_mode=str(
-            typing_raw.get("composer_write_mode", "type")
+            typing_raw.get("composer_write_mode", "uia")
         ).casefold(),
+        composer_settle_timeout_seconds=float(
+            typing_raw.get("composer_settle_timeout_seconds", 0.25)
+        ),
         auto_activate_discord=bool(typing_raw.get("auto_activate_discord", True)),
         activation_idle_ms=int(typing_raw.get("activation_idle_ms", 350)),
         restore_previous_foreground=bool(
@@ -1138,6 +1143,7 @@ def validate_config(config: AppConfig) -> None:
         config.typing.fallback_answer_open_delay_seconds,
         config.typing.enter_after_open_slack_seconds,
         config.typing.foreground_wait_timeout_seconds,
+        config.typing.composer_settle_timeout_seconds,
     )
     if not all(math.isfinite(value) for value in timing_values):
         raise ValueError("typing timing values must be finite")
@@ -1156,8 +1162,15 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("typing composer selectors cannot be empty")
     if config.typing.max_answer_characters < 1:
         raise ValueError("typing.max_answer_characters must be positive")
-    if config.typing.composer_write_mode not in {"type", "uia"}:
-        raise ValueError("typing.composer_write_mode must be 'type' or 'uia'")
+    if config.typing.composer_write_mode != "uia":
+        raise ValueError(
+            "typing.composer_write_mode must be 'uia'; character-at-a-time "
+            "typing is unsafe with Discord's asynchronous Slate UIA value"
+        )
+    if not 0.05 <= config.typing.composer_settle_timeout_seconds <= 2.0:
+        raise ValueError(
+            "typing.composer_settle_timeout_seconds must be between 0.05 and 2.0"
+        )
     if not 0 <= config.typing.activation_idle_ms <= 5000:
         raise ValueError("typing.activation_idle_ms must be between 0 and 5000")
     if not 1 <= config.typing.max_guesses_per_round <= 5:

@@ -29,7 +29,7 @@ class RecordingDispatcher:
 def make_async_app(signature: str, fingerprint: str, round_token: str):
     app = AnimeTriviaAutomation.__new__(AnimeTriviaAutomation)
     app._active_prompt = ActivePromptState()
-    app._active_prompt.update(signature, "locked", 1, fingerprint)
+    app._active_prompt.update(round_token, "locked", 1, fingerprint)
     app._active_status_token = round_token
     app._active_status_closed = False
     app._active_resolution_key = (round_token, fingerprint)
@@ -58,7 +58,7 @@ def make_async_app(signature: str, fingerprint: str, round_token: str):
     request = ResolutionRequest(
         key=(round_token, fingerprint),
         round_token=round_token,
-        signature=signature,
+        signature=round_token,
         clue_fingerprint=fingerprint,
         clue='"Who decides limits? And based on what?"',
         observation=observation,
@@ -251,7 +251,7 @@ class AsyncResolutionTests(unittest.TestCase):
         self.assertFalse(state.queued)
         self.assertEqual(app._dispatcher.tasks, [])
 
-        app._active_prompt.update(signature, "ready", 3, fingerprint)
+        app._active_prompt.update(round_token, "ready", 3, fingerprint)
         self.assertTrue(app._queue_resolution_candidate(state))
         self.assertTrue(state.queued)
         self.assertEqual(len(app._dispatcher.tasks), 1)
@@ -286,7 +286,7 @@ class AsyncResolutionTests(unittest.TestCase):
         round_token = "session-1:round-1:1/10"
         app, state = make_async_app(signature, fingerprint_a, round_token)
 
-        app._active_prompt.update(signature, "locked", 2, fingerprint_b)
+        app._active_prompt.update(round_token, "locked", 2, fingerprint_b)
         app._active_resolution_key = (round_token, fingerprint_b)
         app._accept_resolution_result(
             ProviderResolution(
@@ -302,7 +302,7 @@ class AsyncResolutionTests(unittest.TestCase):
         self.assertEqual(state.candidate.answer, "One-Punch Man")
         self.assertEqual(app._dispatcher.tasks, [])
 
-        app._active_prompt.update(signature, "ready", 3, fingerprint_a)
+        app._active_prompt.update(round_token, "ready", 3, fingerprint_a)
         app._active_resolution_key = state.request.key
         self.assertTrue(app._queue_resolution_candidate(state))
         self.assertEqual(app._dispatcher.tasks[0].answer, "One-Punch Man")
@@ -459,7 +459,7 @@ class AsyncResolutionTests(unittest.TestCase):
         self.assertEqual(submitted, [])
 
         app._active_resolution_key = state.request.key
-        app._active_prompt.update(signature, "locked", 3, fingerprint_a)
+        app._active_prompt.update(round_token, "locked", 3, fingerprint_a)
         app._emit_unknown_if_complete(state)
         self.assertTrue(state.fallback_started)
         self.assertEqual(submitted, ["antigravity"])
@@ -535,7 +535,7 @@ class AsyncResolutionTests(unittest.TestCase):
         self.assertEqual(submitted, [])
 
         app._active_resolution_key = state.request.key
-        app._active_prompt.update(signature, "locked", 3, fingerprint_a)
+        app._active_prompt.update(round_token, "locked", 3, fingerprint_a)
         app._emit_unknown_if_complete(state)
 
         self.assertEqual(submitted, ["qwen"])

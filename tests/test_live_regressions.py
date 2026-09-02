@@ -61,6 +61,34 @@ class AmbiguousAtomicComposer(FakeComposer):
         raise RuntimeError("simulated exception after complete atomic write")
 
 
+class DelayedAtomicComposer(FakeComposer):
+    """Expose UIA writes only after a few CurrentValue reads, like Discord Slate."""
+
+    def __init__(self, lag_reads: int = 3) -> None:
+        super().__init__()
+        self._lag_reads = lag_reads
+        self._pending: str | None = None
+        self._remaining_reads = 0
+
+    def value(self) -> str:
+        if self._pending is not None:
+            if self._remaining_reads > 0:
+                self._remaining_reads -= 1
+            else:
+                self.text = self._pending
+                self._pending = None
+        return self.text
+
+    def set_owned_value(self, value: str) -> None:
+        self.set_values.append(value)
+        self._pending = value
+        self._remaining_reads = self._lag_reads
+
+    def clear_owned_value(self) -> None:
+        self._pending = ""
+        self._remaining_reads = self._lag_reads
+
+
 class FakeGuard:
     window = ForegroundWindow(1, 2, "Discord.exe", "Anime Soul - Discord")
 
@@ -236,7 +264,7 @@ def make_executor(
     active: ActivePromptState,
     composer: FakeComposer,
     *,
-    write_mode: str = "type",
+    write_mode: str = "uia",
     auto_activate: bool = True,
 ) -> SafeKeyboardExecutor:
     executor = SafeKeyboardExecutor.__new__(SafeKeyboardExecutor)
@@ -1099,7 +1127,7 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertEqual(guard.activations, [])
         self.assertFalse(executor._controller.entered)
 
-    def test_keystroke_commit_types_full_answer_after_green_then_enters(self) -> None:
+    def test_atomic_commit_stages_full_answer_after_green_then_enters(self) -> None:
         active = ActivePromptState()
         signature = "round:character:2/10"
         active.update(signature, "locked", 1)
@@ -1122,37 +1150,40 @@ class LiveRegressionTests(unittest.TestCase):
         active.update(signature, "ready", 2)
         thread.join(1.0)
         self.assertEqual(result, [True])
-        self.assertEqual("".join(executor._controller.type_calls), task.answer)
-        self.assertEqual(composer.set_values, [])
+        self.assertEqual(executor._controller.type_calls, [])
+        self.assertEqual(composer.set_values, [task.answer])
         self.assertTrue(executor._controller.entered)
         self.assertEqual(composer.text, "")
 
-    def test_keystroke_commit_stops_when_a_human_types_into_the_draft(self) -> None:
+    def test_atomic_commit_waits_for_discord_uia_value_acknowledgement(self) -> None:
         active = ActivePromptState()
         signature = "round:character:2/10"
         active.update(signature, "ready", 1)
-        composer = FakeComposer()
+        composer = DelayedAtomicComposer()
         executor = make_executor(active, composer)
-
-        class InterferingController(FakeController):
-            def type(self, character: str) -> None:
-                super().type(character)
-                if len(self.composer.text) == 3:
-                    self.composer.text += "x"
-
-        executor._controller = InterferingController(composer, executor._enter_key)
         task = AnswerTask(
-            answer="Fuu Kasumi",
+            answer="Benedict Blue",
             prompt_signature=signature,
             expected_answer_type="character",
             question_label="2/10",
             detected_at=time.monotonic(),
             countdown_seconds=0.0,
-            source="gemini-3.8-structured",
+            source="history-cache",
         )
-        self.assertFalse(executor.execute(task))
-        self.assertFalse(executor._controller.entered)
-        self.assertEqual(composer.text, "Fuux")
+
+        self.assertTrue(executor.execute(task))
+        self.assertEqual(composer.set_values, [task.answer])
+        self.assertEqual(executor._controller.type_calls, [])
+        self.assertTrue(executor._controller.entered)
+        self.assertEqual(composer.text, "")
+
+    def test_character_at_a_time_mode_is_rejected_for_live_config(self) -> None:
+        config = AppConfig(
+            capture=CaptureConfig(region=(0, 0, 1920, 1080), calibrated=True),
+            typing=TypingConfig(composer_write_mode="type"),
+        )
+        with self.assertRaisesRegex(ValueError, "must be 'uia'"):
+            validate_config(config)
 
     def test_latest_only_dispatch_replaces_stale_fingerprint_variants(self) -> None:
         active = ActivePromptState()

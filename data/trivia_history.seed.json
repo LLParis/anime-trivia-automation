@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source": "Anime Soul bot reveals, accepted-live correlations, and per-row labeled user-capture cross-checks; only rows marked bot-reveal are bot-confirmed",
-  "captured_utc": "2026-09-02T14:05:00Z",
+  "captured_utc": "2026-09-02T19:08:58Z",
   "pairs": [
     {"clue": "\"Sometimes living can be hard, but it's only because we're alive that we can make each other laugh, cry, and be happy.\"", "type": "anime_title", "answer": "Fruits Basket"},
     {"clue": "🏍️ 💊 🏙️ 💥", "type": "anime_title", "answer": "Akira"},
@@ -160,6 +160,16 @@
     {"clue": "\"A believing heart is your magic.\"", "type": "anime_title", "answer": "Little Witch Academia", "verification": "user-live-capture-cross-check-2026-09-02-07"},
     {"clue": "\"The net is vast and infinite.\"", "type": "anime_title", "answer": "Ghost in the Shell", "verification": "bot-reveal-transcript-2026-09-02-07"},
     {"clue": "The warmhearted middle sister of the Kawamoto family who often encourages a lonely professional shogi player.", "type": "character", "answer": "Hinata Kawamoto", "verification": "bot-reveal-transcript-2026-09-02-07"},
-    {"clue": "🥘 🐉 🛡️ 🗺️", "type": "anime_title", "answer": "Delicious in Dungeon", "verification": "bot-reveal-transcript-2026-09-02-07"}
+    {"clue": "🥘 🐉 🛡️ 🗺️", "type": "anime_title", "answer": "Delicious in Dungeon", "verification": "bot-reveal-transcript-2026-09-02-07"},
+    {"clue": "\"The future rules!\"", "type": "anime_title", "answer": "Chainsaw Man", "verification": "runtime-paired-bot-reveal-2026-09-02-12"},
+    {"clue": "🏰 🔥 🧙‍♂️ 🚪", "type": "anime_title", "answer": "Howl's Moving Castle", "verification": "user-manual-gemini-screenshot-plus-reviewed-alternate-2026-09-02-12"},
+    {"clue": "A beautiful and mysterious official who manages the rear palace and regularly brings unusual mysteries to an apothecary.", "type": "character", "answer": "Jinshi", "verification": "runtime-paired-bot-reveal-2026-09-02-12"},
+    {"clue": "⚔️ ❌ 🔪 🌸", "type": "anime_title", "answer": "Rurouni Kenshin", "verification": "user-manual-gemini-screenshot-plus-reviewed-alternate-2026-09-02-12"},
+    {"clue": "\"It's not Zura! It's Katsura!\"", "type": "anime_title", "answer": "Gintama", "verification": "bot-reveal-transcript-2026-09-02-12"},
+    {"clue": "A blond postman at the CH Postal Company who moves with unusual agility and often teases his coworkers.", "type": "character", "answer": "Benedict Blue", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-02-12"},
+    {"clue": "👽 ✋ 🧠 🏥", "type": "anime_title", "answer": "Parasyte the Maxim", "verification": "bot-reveal-transcript-2026-09-02-12"},
+    {"clue": "🏍️ 🏚️ ❄️ 🥫", "type": "anime_title", "answer": "Girls' Last Tour", "verification": "bot-reveal-transcript-2026-09-02-12"},
+    {"clue": "💀 🧙‍♂️ 🌹 🧚‍♀️", "type": "anime_title", "answer": "The Ancient Magus' Bride", "verification": "bot-reveal-transcript-2026-09-02-12"},
+    {"clue": "\"No matter where you go, everyone's connected.\"", "type": "anime_title", "answer": "Serial Experiments Lain", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-02-12"}
   ]
 }

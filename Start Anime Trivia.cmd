@@ -19,7 +19,7 @@ if not exist "config.json" (
 
 echo Loading local OCR, reviewed history, account Gemini 3.8, and the controlled Developer API fallback. Capture starts after ARMED.
 echo Any current red or green card can be handled, even if you start mid-quiz.
-echo A verified answer types only after the same card turns green.
+echo A verified answer is staged as one complete value only after the same card turns green.
 echo If Chrome is in front when the card turns green, Discord is raised once you pause typing,
 echo the answer is sent, and focus returns to Chrome. Log + ledger: runtime\logs, runtime\round_ledger.jsonl.
 echo Press F12 to stop.

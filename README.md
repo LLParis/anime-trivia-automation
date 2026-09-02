@@ -2,14 +2,14 @@
 
 Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, answers from reviewed history first, resolves new semantic clues with account-authenticated Gemini 3.8, and types the first verified answer when the same card turns green.
 
-Version 0.10.0 is the post-mortem of three lost quizzes (2026-09-01 07:00 and 12:00, 2026-09-02 07:00) and changes the operating policy accordingly:
+Version 0.10.1 includes the 2026-09-02 noon live-run repair. It retains the v0.10 round policy and makes complete-value submission the only production writer:
 
 - **Any live card is answered.** The locked-Question-1 latch is gone. It made the worker ignore every card of a quiz it joined mid-way (all of Q7–Q10 on 2026-09-02 after the launcher crashed and was restarted). Red or green cards are always the live round; only grey cards are inert.
 - **First verified answer wins; later evidence can recover.** A wrong message triggers Discord's five-second slowmode, so follow-up guesses are spaced by at least five seconds. The first grounded answer to arrive is queued immediately; later distinct grounded answers can be tried only while the same card remains green, up to `typing.max_guesses_per_round`. Identical answers are never re-sent.
 - **Confidence and evidence remain real gates.** Antigravity must return a high-confidence structured answer. Local Qwen is a disabled workstation fallback after its 2026-09-02 evaluation produced only 7/20 correct first answers; when enabled elsewhere, an answer must match independent retrieved evidence and ungrounded alternatives are discarded.
 - **The measured provider is primary.** Account-authenticated Antigravity Gemini 3.8 handles Discord semantic text and emoji. The Gemini 3.8 Developer API is enabled only for a raw-image or account-provider-unavailable fallback; its circuit stops all later calls for five minutes after the first rate-limit error. Local Qwen submission remains disabled.
 - **Works while you research manually.** If Chrome/Gemini is in front when the card turns green, the app waits until you have been input-idle for `typing.activation_idle_ms`, raises the one Discord window itself, sends the answer, then hands focus back to the previous window.
-- **Real keystrokes at green.** The complete answer is typed with fast real keystrokes (`typing.composer_write_mode = "type"`, the mechanism that produced the only live submission so far) as soon as the same card is green; every character is verified against the composer, so a human edit cancels the draft without erasing anyone's text. The UI Automation write is still available as `"uia"`.
+- **One complete answer at green.** The live writer uses a single UI Automation ValuePattern write (`typing.composer_write_mode = "uia"`) only after the same card is green, verifies the complete value, and then presses Enter. Character-at-a-time injection is rejected because Discord's Slate accessibility value can lag the visible editor and strand a one-letter prefix. Existing manual text always wins and is never erased.
 - **Every round is on disk.** `runtime/logs/anime-trivia-<stamp>.log` holds the full per-launch log and `runtime/round_ledger.jsonl` records every status event with timestamps, so a failed quiz can be reconstructed instead of guessed at.
 
 ```text
@@ -17,13 +17,13 @@ DXcam 60 FPS physical-pixel crop
   -> CUDA change/stability gate
   -> PaddleOCR GPU + newest-card/readiness extraction
   -> Discord UI Automation semantic clue read (exact text/emoji)
-       -> reviewed 158-pair history (exact text + exact emoji)
+       -> reviewed 168-pair history (exact text + exact emoji)
        -> fuzzy text cache / strict pHash cache
        -> unseen semantic clue: Antigravity Gemini 3.8 Low
        -> raw image or account outage: one Gemini 3.8 Developer API fallback
        -> unresolved: warn and abstain; manual play stays available
   -> at green: raise Discord if needed (operator idle), claim the empty
-     #💜anime-chat composer, type the complete answer, verify, Enter
+     #💜anime-chat composer, atomically stage the complete answer, verify, Enter
   -> follow-up guesses after the gap while the card is still green
   -> learn the durable answer only from the bot's own reveal
 ```
@@ -35,7 +35,7 @@ DXcam 60 FPS physical-pixel crop
 - `src/anime_trivia_automation/discord.py` — direct Windows UI Automation access to the semantic question, official reveals, and the exact Discord composer.
 - `src/anime_trivia_automation/cache.py` — authoritative history, fuzzy text, strict pHash, semantic clues, and atomic JSON persistence.
 - `src/anime_trivia_automation/app.py` — orchestration: scene processing, concurrent resolution with the guess ladder, reveal learning, shutdown.
-- `src/anime_trivia_automation/typing.py` — green-gated keystroke/UIA commit, composer ownership, idle-gated Discord activation and focus restore, the multi-guess dispatcher, and F12 stop.
+- `src/anime_trivia_automation/typing.py` — green-gated atomic UIA commit, composer ownership, idle-gated Discord activation and focus restore, the multi-guess dispatcher, and F12 stop.
 - `src/anime_trivia_automation/status.py` — structured operator events, counters, heartbeat, atomic status persistence, and the JSONL round ledger.
 - `src/anime_trivia_automation/status_window.py` — passive top-right status panel using Windows no-activate/click-through styles.
 - `src/anime_trivia_automation/novel.py` — managed llama.cpp lifecycle, exact quote table, local BM25 + web retrieval, one ranked Qwen3.8 synthesis with alternatives, canonicalization.
@@ -43,8 +43,8 @@ DXcam 60 FPS physical-pixel crop
 - `src/anime_trivia_automation/antigravity.py` — account-authenticated Gemini 3.8 Low CLI provider with structured output, emoji reading, environment isolation, output bounds, absolute deadlines, and owned process-tree shutdown.
 - `src/anime_trivia_automation/knowledge.py` — read-only exact-quote and FTS5 access to the local source-attributed anime index.
 - `src/anime_trivia_automation/vlm.py` — experimental in-process local VLM; live submission is disabled in config.
-- `data/trivia_history.seed.json` — 158 reviewed clue→answer pairs with per-row provenance.
-- `data/answer_catalog.seed.json` — 232 canonical answer strings used for spelling canonicalization.
+- `data/trivia_history.seed.json` — 168 reviewed clue→answer pairs with per-row provenance.
+- `data/answer_catalog.seed.json` — 234 canonical answer strings used for spelling canonicalization.
 - `data/trivia_cache.seed.json` — reviewed text/pHash starter cache; `data/trivia_cache.json` is the ignored mutable cache.
 - `scripts/eval_resolvers.py` — offline accuracy/latency report of a provider over the reviewed history (no Discord, no keyboard).
 - `scripts/replay_screenshots.py` — one-warmup offline replay of saved cards.
@@ -145,7 +145,7 @@ The mutable cache schema is JSON with text, pHash, and semantic maps plus per-en
 - The colored-accent prelocator keeps active-card OCR near 60–100 ms; closed grey cards fall back to the full band (400–700 ms).
 - History/cache lookups are effectively immediate.
 - Measured 2026-09-02: Antigravity answered five real text cards correctly in roughly 3.6–4.6 s when it returned before deadline. The local Qwen speed was 1–4 s but only 7/20 evaluated first answers were correct, so it is disabled on the workstation. A wasteful Developer API evaluation returned 0/24; batch evaluation is now blocked and the API is reserved for live fallback.
-- Green→Enter for an answer already in hand: readiness OCR pass plus fast keystrokes (12–28 ms per character) plus the 60 ms slack.
+- Real Discord integration probe on 2026-09-02: complete-value acknowledgment took 16–22 ms and verified clearing took 15–17 ms across three focused round trips; no Enter was pressed. Live Green→Enter also includes the readiness OCR pass and 60 ms ownership slack.
 
 ## Implementation references
 

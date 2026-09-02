@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -24,7 +25,8 @@ def main() -> int:
 
     config = load_config(args.config)
     ocr = PaddleOCREngine(config.ocr)
-    extractor = PromptExtractor(config.prompt, config.matching, config.readiness)
+    offline_readiness = replace(config.readiness, allow_text_only_ready=True)
+    extractor = PromptExtractor(config.prompt, config.matching, offline_readiness)
     cache = TriviaCache(
         config.runtime.cache_path,
         config.matching,

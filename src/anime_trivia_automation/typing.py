@@ -619,7 +619,12 @@ class SafeKeyboardExecutor:
                 )
                 return False
             composer.clear_owned_value()
-            if composer.value() != "":
+            current_value = self._wait_for_composer_value(
+                composer,
+                expected="",
+                transitional_values={expected_prefix},
+            )
+            if current_value != "":
                 LOGGER.warning("Targeted Discord draft cleanup did not clear the editor")
                 return False
             LOGGER.info("Cleared exact macro-owned draft after cancellation")
@@ -639,6 +644,27 @@ class SafeKeyboardExecutor:
                 pass
         if not self._clear_owned_draft(composer, expected_prefix):
             self._remember_orphan(expected_prefix)
+
+    def _wait_for_composer_value(
+        self,
+        composer: DiscordComposer,
+        *,
+        expected: str,
+        transitional_values: set[str],
+    ) -> str:
+        """Wait briefly for Discord's asynchronous UIA value to acknowledge a write."""
+
+        deadline = (
+            time.monotonic() + self._config.composer_settle_timeout_seconds
+        )
+        while True:
+            current = composer.value()
+            if current == expected or current not in transitional_values:
+                return current
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return current
+            time.sleep(min(remaining, 0.005))
 
     def _wait_pre_delay(
         self,
@@ -877,88 +903,6 @@ class SafeKeyboardExecutor:
         except Exception:
             LOGGER.debug("Could not restore the previous foreground window", exc_info=True)
 
-    def _type_complete_answer(
-        self,
-        task: AnswerTask,
-        answer: str,
-        window: ForegroundWindow,
-        composer: DiscordComposer | None,
-    ) -> str:
-        """Type the complete answer with real keystrokes while the card is green.
-
-        Returns ``committed``, ``manual``, ``retry``, ``ambiguous``, or ``stale``.
-        Every character is verified against the composer so a human edit or a
-        round change cancels the draft without erasing anyone else's text.
-        """
-
-        def prompt_live() -> bool:
-            if self._readiness_config.require_green_outline:
-                return self._active_prompt.is_ready(
-                    task.prompt_signature, task.clue_fingerprint
-                )
-            return self._active_prompt.is_open(
-                task.prompt_signature, task.clue_fingerprint
-            )
-
-        if not prompt_live():
-            return "stale"
-        current_window = self._guard.current()
-        allowed, reason = self._guard.validate(current_window)
-        if not allowed or current_window is None or current_window.hwnd != window.hwnd:
-            LOGGER.info("Keystroke commit deferred: %s", reason)
-            return "retry"
-        if composer is None:
-            LOGGER.warning("Keystroke commit requires a verified Discord composer")
-            return "ambiguous"
-        try:
-            if composer.value() != "":
-                return "manual"
-            if not composer.focused():
-                return "retry"
-        except Exception:
-            LOGGER.debug("Discord composer rerendered before typing", exc_info=True)
-            return "retry"
-
-        typed = 0
-        delays = [random.uniform(*self._config.key_delay_seconds) for _ in answer]
-        for character, delay in zip(answer, delays, strict=True):
-            if self._stop_event.is_set() or not prompt_live():
-                self._clear_or_remember(composer, answer[:typed])
-                return "stale"
-            try:
-                if not composer.focused() or composer.value() != answer[:typed]:
-                    LOGGER.warning("Composer diverged from the owned prefix while typing")
-                    self._clear_or_remember(composer, answer[:typed])
-                    return "manual"
-            except Exception:
-                LOGGER.warning("Composer verification failed while typing", exc_info=True)
-                self._remember_orphan(answer[:typed])
-                return "ambiguous"
-            try:
-                self._controller.type(character)
-            except Exception:
-                LOGGER.warning("Character injection outcome is ambiguous", exc_info=True)
-                self._remember_orphan(answer[: typed + 1])
-                return "ambiguous"
-            typed += 1
-            if delay > 0:
-                time.sleep(delay)
-        try:
-            final_value = composer.value()
-        except Exception:
-            LOGGER.warning("Could not verify the completed keystroke draft", exc_info=True)
-            self._remember_orphan(answer)
-            return "ambiguous"
-        if final_value == answer:
-            return "committed"
-        if final_value.startswith(answer):
-            # Discord appended something (autocomplete/emoji) after the last
-            # key; treat it as a manual divergence rather than sending it.
-            LOGGER.warning("Composer contains more than the owned answer; not sending")
-            return "manual"
-        self._clear_or_remember(composer, final_value if answer.startswith(final_value) else "")
-        return "retry" if final_value == "" else "manual"
-
     def _commit_complete_answer(
         self,
         task: AnswerTask,
@@ -966,14 +910,8 @@ class SafeKeyboardExecutor:
         window: ForegroundWindow,
         composer: DiscordComposer | None,
     ) -> str:
-        """Place the complete answer in the composer while the exact prompt is green.
+        """Atomically place the complete answer while the exact prompt is green."""
 
-        Dispatches to real keystrokes (``typing.composer_write_mode = "type"``)
-        or the UI Automation ValuePattern write (``"uia"``).
-        """
-
-        if self._config.composer_write_mode == "type":
-            return self._type_complete_answer(task, answer, window, composer)
         return self._set_complete_answer(task, answer, window, composer)
 
     def _set_complete_answer(
@@ -1023,31 +961,22 @@ class SafeKeyboardExecutor:
                 outcome = "retry"
                 return False
 
+            write_raised = False
             try:
                 composer.set_owned_value(answer)
             except Exception:
+                write_raised = True
                 LOGGER.warning(
                     "Atomic composer write raised; verifying the complete value",
                     exc_info=True,
                 )
-                try:
-                    current_value = composer.value()
-                except Exception:
-                    self._remember_orphan(answer)
-                    outcome = "ambiguous"
-                    return False
-                if current_value == answer:
-                    LOGGER.info("Atomic composer write was verified after an exception")
-                    outcome = "committed"
-                    return True
-                if current_value == "":
-                    outcome = "ambiguous"
-                    return False
-                outcome = "manual"
-                return False
 
             try:
-                current_value = composer.value()
+                current_value = self._wait_for_composer_value(
+                    composer,
+                    expected=answer,
+                    transitional_values={""},
+                )
             except Exception:
                 LOGGER.warning(
                     "Could not verify the complete atomic composer value",
@@ -1057,10 +986,35 @@ class SafeKeyboardExecutor:
                 outcome = "ambiguous"
                 return False
             if current_value == answer:
+                if write_raised:
+                    LOGGER.info("Atomic composer write was verified after an exception")
                 outcome = "committed"
                 return True
             if current_value == "":
-                outcome = "retry"
+                # SetValue is asynchronous in Discord. Queueing a clear after a
+                # timed-out set prevents a late full answer from materializing
+                # after this task has already been abandoned.
+                LOGGER.warning(
+                    "Atomic composer write was not acknowledged; canceling the pending value"
+                )
+                try:
+                    composer.clear_owned_value()
+                    cleared_value = self._wait_for_composer_value(
+                        composer,
+                        expected="",
+                        transitional_values={answer},
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "Could not verify cancellation of the pending atomic value",
+                        exc_info=True,
+                    )
+                    self._remember_orphan(answer)
+                    outcome = "ambiguous"
+                    return False
+                if cleared_value != "":
+                    self._remember_orphan(answer)
+                outcome = "ambiguous"
                 return False
             outcome = "manual"
             return False
@@ -1391,15 +1345,18 @@ class AnswerDispatcher:
                 for stale in [key for key in self._answered if key != signature]:
                     self._answered.pop(stale, None)
                     self._last_sent_at.pop(stale, None)
-                if clue_fingerprint is not None:
-                    # Queued OCR variants of the same round with an older
-                    # fingerprint can never pass the executor's identity check.
-                    self._queue = deque(
-                        task
-                        for task in self._queue
-                        if task.prompt_signature != signature
+                # There is only one live prompt. Retire every queued task from
+                # an older unique round token, then retain only the current
+                # round's current OCR/semantic fingerprint when one is known.
+                self._queue = deque(
+                    task
+                    for task in self._queue
+                    if task.prompt_signature == signature
+                    and (
+                        clue_fingerprint is None
                         or task.clue_fingerprint == clue_fingerprint
                     )
+                )
             self._condition.notify_all()
         return True
 
