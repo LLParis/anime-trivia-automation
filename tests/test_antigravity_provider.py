@@ -1,20 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from anime_trivia_automation.antigravity import (
     AntigravityProvider,
     AntigravityRequest,
     _ProcessOutcome,
 )
-from anime_trivia_automation.config import AntigravityConfig
+from anime_trivia_automation.config import (
+    AntigravityConfig,
+    load_config,
+    validate_config,
+)
 
 
 class FakeRunner:
@@ -178,6 +185,38 @@ class AntigravityProviderTests(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 2.0)
             self.assertLess(outcome.duration_seconds, 2.0)
             self.assertEqual(provider._active_processes, {})
+
+    def test_request_directory_cleanup_retries_a_windows_handle_race(self) -> None:
+        with patch(
+            "anime_trivia_automation.antigravity.shutil.rmtree",
+            side_effect=[PermissionError(), None],
+        ) as remove, patch("anime_trivia_automation.antigravity.time.sleep") as sleep:
+            AntigravityProvider._cleanup_request_directory(Path("request-race"))
+
+        self.assertEqual(remove.call_count, 2)
+        sleep.assert_called_once_with(0.05)
+
+    def test_verified_cli_can_live_outside_virtualized_local_app_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "agy.exe"
+            executable.write_bytes(b"versioned signed CLI fixture")
+            digest = hashlib.sha256(executable.read_bytes()).hexdigest().upper()
+            config = load_config("config.example.json")
+            installed = replace(
+                config.antigravity,
+                enabled=True,
+                executable=executable,
+                executable_sha256=digest,
+            )
+
+            validate_config(replace(config, antigravity=installed))
+            with self.assertRaisesRegex(ValueError, "failed SHA-256 verification"):
+                validate_config(
+                    replace(
+                        config,
+                        antigravity=replace(installed, executable_sha256="0" * 64),
+                    )
+                )
 
 
 if __name__ == "__main__":

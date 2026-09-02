@@ -137,6 +137,7 @@
   "antigravity": {
     "enabled": false,
     "executable": "%LOCALAPPDATA%/agy/bin/agy.exe",
+    "executable_sha256": "BFFA9C1227A517D0DBD7DDFC71A64BF6473C52FAB95369CABE09FF42BD9B3B3E",
     "model_slug": "gemini-3.7-flash-low",
     "working_root": "runtime/antigravity",
     "preflight_timeout_seconds": 8.0,

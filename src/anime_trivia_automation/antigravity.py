@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -642,10 +643,10 @@ class AntigravityProvider:
     ) -> _ProcessOutcome:
         budget = self._process_budget(deadline) if process_budget is None else process_budget
         self._config.working_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            prefix="request-", dir=str(self._config.working_root)
-        ) as directory:
-            cwd = Path(directory)
+        cwd = Path(
+            tempfile.mkdtemp(prefix="request-", dir=str(self._config.working_root))
+        )
+        try:
             if any(cwd.iterdir()):
                 raise RuntimeError("Antigravity dedicated directory is not empty")
             task = asyncio.to_thread(
@@ -662,6 +663,26 @@ class AntigravityProvider:
                 return await asyncio.wait_for(task, timeout=remaining)
             except asyncio.TimeoutError as exc:
                 raise TimeoutError("Antigravity invocation exceeded its deadline") from exc
+        finally:
+            await asyncio.to_thread(self._cleanup_request_directory, cwd)
+
+    @staticmethod
+    def _cleanup_request_directory(path: Path) -> None:
+        """Remove an empty request cwd after Windows releases child handles."""
+
+        for attempt in range(12):
+            try:
+                shutil.rmtree(path)
+                return
+            except FileNotFoundError:
+                return
+            except PermissionError:
+                if attempt == 11:
+                    LOGGER.warning(
+                        "Antigravity request directory cleanup was deferred"
+                    )
+                    return
+                time.sleep(0.05)
 
     def _child_environment(self) -> dict[str, str]:
         return {
