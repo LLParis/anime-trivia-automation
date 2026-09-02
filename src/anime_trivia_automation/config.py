@@ -190,13 +190,13 @@ class NovelConfig:
     cache_type: str = "q4_0"
     mtp_draft_tokens: int = 3
     startup_timeout_seconds: float = 30.0
-    total_timeout_seconds: float = 5.0
+    total_timeout_seconds: float = 8.0
     model_timeout_seconds: float = 4.0
-    web_timeout_seconds: float = 2.0
+    web_timeout_seconds: float = 1.5
     max_search_queries: int = 3
     max_search_results: int = 10
     max_evidence_characters: int = 5000
-    min_confidence: float = 0.72
+    min_confidence: float = 0.45
     max_answer_characters: int = 96
     answer_catalog_path: Path | None = Path("data/answer_catalog.seed.json")
     knowledge_index_path: Path | None = Path("data/anime_knowledge.sqlite")
@@ -216,7 +216,8 @@ class GeminiConfig:
     preflight_timeout_seconds: float = 12.0
     total_timeout_seconds: float = 30.0
     text_timeout_seconds: float = 10.0
-    min_confidence: float = 0.90
+    min_confidence: float = 0.35
+    max_alternatives: int = 2
     max_answer_characters: int = 96
     max_clue_characters: int = 2000
     max_image_bytes: int = 4_000_000
@@ -233,7 +234,7 @@ class AntigravityConfig:
     working_root: Path = Path("runtime/antigravity")
     preflight_timeout_seconds: float = 8.0
     total_timeout_seconds: float = 6.0
-    min_confidence: float = 0.90
+    min_confidence: float = 0.35
     max_answer_characters: int = 96
     max_clue_characters: int = 2000
     max_stdout_bytes: int = 262_144
@@ -244,8 +245,8 @@ class TypingConfig:
     enabled: bool = True
     expected_process_names: tuple[str, ...] = ("Discord.exe",)
     expected_window_title_contains: str = "Discord"
-    pre_delay_seconds: tuple[float, float] = (0.4, 1.1)
-    key_delay_seconds: tuple[float, float] = (0.03, 0.08)
+    pre_delay_seconds: tuple[float, float] = (0.05, 0.15)
+    key_delay_seconds: tuple[float, float] = (0.012, 0.028)
     draft_while_locked: bool = True
     verify_composer: bool = True
     auto_focus_composer: bool = True
@@ -257,6 +258,20 @@ class TypingConfig:
     enter_after_open_slack_seconds: float = 0.06
     max_answer_characters: int = 96
     stop_key: str = "f12"
+    # How the complete answer reaches the Slate composer once the card is
+    # green. ``type`` sends real keystrokes (proven live against Discord);
+    # ``uia`` uses the UI Automation ValuePattern write.
+    composer_write_mode: str = "type"
+    # When another app (Chrome/Gemini) is foreground at green, bring the one
+    # Discord window forward ourselves once the operator has been input-idle
+    # for this long, then hand focus back after Enter.
+    auto_activate_discord: bool = True
+    activation_idle_ms: int = 350
+    restore_previous_foreground: bool = True
+    # Wrong guesses cost nothing in Anime Soul, so a round may receive up to
+    # this many distinct answers, spaced by the gap, while it stays green.
+    max_guesses_per_round: int = 3
+    guess_gap_seconds: float = 1.5
 
 
 @dataclass(frozen=True)
@@ -281,6 +296,8 @@ class RuntimeConfig:
     seed_cache_path: Path | None = Path("data/trivia_cache.seed.json")
     history_path: Path | None = Path("data/trivia_history.seed.json")
     status_path: Path = Path("runtime/operator_status.json")
+    ledger_path: Path | None = Path("runtime/round_ledger.jsonl")
+    log_dir: Path | None = Path("runtime/logs")
     debug_dir: Path = Path("debug")
     save_prompt_crops: bool = False
     scene_retry_limit: int = 1
@@ -488,8 +505,8 @@ def load_config(path: str | Path) -> AppConfig:
         max_answer_characters=int(vlm_raw.get("max_answer_characters", 96)),
     )
 
-    pre_delay = typing_raw.get("pre_delay_seconds", [0.4, 1.1])
-    key_delay = typing_raw.get("key_delay_seconds", [0.03, 0.08])
+    pre_delay = typing_raw.get("pre_delay_seconds", [0.05, 0.15])
+    key_delay = typing_raw.get("key_delay_seconds", [0.012, 0.028])
     typing = TypingConfig(
         enabled=bool(typing_raw.get("enabled", True)),
         expected_process_names=tuple(
@@ -523,6 +540,16 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         max_answer_characters=int(typing_raw.get("max_answer_characters", 96)),
         stop_key=str(typing_raw.get("stop_key", "f12")).casefold(),
+        composer_write_mode=str(
+            typing_raw.get("composer_write_mode", "type")
+        ).casefold(),
+        auto_activate_discord=bool(typing_raw.get("auto_activate_discord", True)),
+        activation_idle_ms=int(typing_raw.get("activation_idle_ms", 350)),
+        restore_previous_foreground=bool(
+            typing_raw.get("restore_previous_foreground", True)
+        ),
+        max_guesses_per_round=int(typing_raw.get("max_guesses_per_round", 3)),
+        guess_gap_seconds=float(typing_raw.get("guess_gap_seconds", 1.5)),
     )
 
     status = StatusConfig(
@@ -584,15 +611,15 @@ def load_config(path: str | Path) -> AppConfig:
         startup_timeout_seconds=float(
             novel_raw.get("startup_timeout_seconds", 30.0)
         ),
-        total_timeout_seconds=float(novel_raw.get("total_timeout_seconds", 5.0)),
+        total_timeout_seconds=float(novel_raw.get("total_timeout_seconds", 6.0)),
         model_timeout_seconds=float(novel_raw.get("model_timeout_seconds", 4.0)),
-        web_timeout_seconds=float(novel_raw.get("web_timeout_seconds", 2.0)),
+        web_timeout_seconds=float(novel_raw.get("web_timeout_seconds", 1.5)),
         max_search_queries=int(novel_raw.get("max_search_queries", 3)),
         max_search_results=int(novel_raw.get("max_search_results", 10)),
         max_evidence_characters=int(
             novel_raw.get("max_evidence_characters", 5000)
         ),
-        min_confidence=float(novel_raw.get("min_confidence", 0.72)),
+        min_confidence=float(novel_raw.get("min_confidence", 0.45)),
         max_answer_characters=int(novel_raw.get("max_answer_characters", 96)),
         answer_catalog_path=(
             resolve_local(str(answer_catalog_value))
@@ -631,7 +658,8 @@ def load_config(path: str | Path) -> AppConfig:
         text_timeout_seconds=float(
             gemini_raw.get("text_timeout_seconds", 10.0)
         ),
-        min_confidence=float(gemini_raw.get("min_confidence", 0.90)),
+        min_confidence=float(gemini_raw.get("min_confidence", 0.35)),
+        max_alternatives=int(gemini_raw.get("max_alternatives", 2)),
         max_answer_characters=int(
             gemini_raw.get("max_answer_characters", 96)
         ),
@@ -660,10 +688,10 @@ def load_config(path: str | Path) -> AppConfig:
             antigravity_raw.get("preflight_timeout_seconds", 8.0)
         ),
         total_timeout_seconds=float(
-            antigravity_raw.get("total_timeout_seconds", 6.0)
+            antigravity_raw.get("total_timeout_seconds", 8.0)
         ),
         min_confidence=float(
-            antigravity_raw.get("min_confidence", 0.90)
+            antigravity_raw.get("min_confidence", 0.35)
         ),
         max_answer_characters=int(
             antigravity_raw.get("max_answer_characters", 96)
@@ -693,6 +721,20 @@ def load_config(path: str | Path) -> AppConfig:
         status_path=resolve_local(
             str(runtime_raw.get("status_path", "runtime/operator_status.json"))
         ),
+        ledger_path=(
+            resolve_local(str(runtime_raw["ledger_path"]))
+            if runtime_raw.get("ledger_path", "runtime/round_ledger.jsonl") not in (None, "")
+            else None
+        )
+        if "ledger_path" in runtime_raw
+        else resolve_local("runtime/round_ledger.jsonl"),
+        log_dir=(
+            resolve_local(str(runtime_raw["log_dir"]))
+            if runtime_raw.get("log_dir") not in (None, "")
+            else None
+        )
+        if "log_dir" in runtime_raw
+        else resolve_local("runtime/logs"),
         debug_dir=resolve_local(str(runtime_raw.get("debug_dir", "debug"))),
         save_prompt_crops=bool(runtime_raw.get("save_prompt_crops", False)),
         scene_retry_limit=int(runtime_raw.get("scene_retry_limit", 1)),
@@ -929,8 +971,12 @@ def validate_config(config: AppConfig) -> None:
             raise ValueError("gemini.api_key_env must be an environment variable name")
         if config.gemini.primary_model != "gemini-3.7-flash":
             raise ValueError("gemini.primary_model must be 'gemini-3.7-flash'")
-        if config.gemini.primary_thinking_level != "low":
-            raise ValueError("gemini.primary_thinking_level must be 'low'")
+        if config.gemini.primary_thinking_level not in {"minimal", "low", "medium"}:
+            raise ValueError(
+                "gemini.primary_thinking_level must be 'minimal', 'low', or 'medium'"
+            )
+        if not 0 <= config.gemini.max_alternatives <= 4:
+            raise ValueError("gemini.max_alternatives must be between 0 and 4")
         if config.gemini.scout_model != "gemini-3.5-flash-lite":
             raise ValueError(
                 "gemini.scout_model must be 'gemini-3.5-flash-lite'"
@@ -1053,6 +1099,14 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("typing composer selectors cannot be empty")
     if config.typing.max_answer_characters < 1:
         raise ValueError("typing.max_answer_characters must be positive")
+    if config.typing.composer_write_mode not in {"type", "uia"}:
+        raise ValueError("typing.composer_write_mode must be 'type' or 'uia'")
+    if not 0 <= config.typing.activation_idle_ms <= 5000:
+        raise ValueError("typing.activation_idle_ms must be between 0 and 5000")
+    if not 1 <= config.typing.max_guesses_per_round <= 5:
+        raise ValueError("typing.max_guesses_per_round must be between 1 and 5")
+    if not 0.0 <= config.typing.guess_gap_seconds <= 10.0:
+        raise ValueError("typing.guess_gap_seconds must be between 0 and 10")
     if config.status.width < 360 or config.status.height < 220:
         raise ValueError("status panel dimensions are too small")
     if config.status.margin_x < 0 or config.status.margin_y < 0:

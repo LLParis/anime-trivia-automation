@@ -17,10 +17,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictStr,
+    ValidationError,
+)
 from pydantic.functional_validators import model_validator
 
 from .config import AntigravityConfig
+from .utils import describe_emoji
 
 LOGGER = logging.getLogger(__name__)
 
@@ -360,7 +368,7 @@ class AntigravityProvider:
                 }
                 if self._config.model_slug not in slugs:
                     raise ValueError("Required Antigravity model is unavailable")
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 self._availability = AntigravityAvailability(
                     phase="unavailable",
                     available=False,
@@ -440,7 +448,7 @@ class AntigravityProvider:
                 started=started,
                 detail=str(exc),
             )
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             return self._result(
                 request,
                 status="timeout",
@@ -617,6 +625,12 @@ class AntigravityProvider:
             f"Required answer_type: {request.expected_answer_type}\n"
             f"UNTRUSTED QUIZ CLUE: {clue}"
         )
+        emoji_reading = describe_emoji(clue)
+        if emoji_reading:
+            prompt += (
+                f"\nThe clue is an emoji rebus; symbols in order: {emoji_reading}. "
+                "Combine their meanings into one title or character."
+            )
         cli_timeout_ms = max(100, int(max(0.1, process_budget - 0.10) * 1000))
         return [
             str(self._config.executable),
@@ -661,7 +675,7 @@ class AntigravityProvider:
                 raise TimeoutError("Antigravity deadline already expired")
             try:
                 return await asyncio.wait_for(task, timeout=remaining)
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 raise TimeoutError("Antigravity invocation exceeded its deadline") from exc
         finally:
             await asyncio.to_thread(self._cleanup_request_directory, cwd)

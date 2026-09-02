@@ -8,8 +8,8 @@ from pathlib import Path
 
 from .app import AnimeTriviaAutomation, inspect_image, print_inspection
 from .config import load_config
-from .status import NullStatus, OperatorStatus
 from .singleton import WorkerAlreadyRunningError, WorkerMutex
+from .status import NullStatus, OperatorStatus
 from .utils import configure_logging
 
 
@@ -76,7 +76,10 @@ def main() -> int:
         return 0
 
     config = load_config(args.config)
-    configure_logging(config.runtime.log_level)
+    configure_logging(
+        config.runtime.log_level,
+        log_dir=None if (args.validate_config or args.inspect_image) else config.runtime.log_dir,
+    )
     if args.validate_config:
         logging.getLogger(__name__).info(
             "Configuration is valid: %s", Path(args.config).resolve()
@@ -105,6 +108,7 @@ def main() -> int:
                 # capture coordinates are still conservative here: they either
                 # describe that display or make us avoid extra primary space.
                 avoid_region=config.capture.region,
+                ledger_path=config.runtime.ledger_path,
             )
         else:
             status = NullStatus()

@@ -61,7 +61,7 @@ class DiscordComposerLocator:
 
         try:
             import comtypes
-            import comtypes.client as client
+            from comtypes import client
 
             comtypes.CoInitialize()
             client.GetModule("UIAutomationCore.dll")

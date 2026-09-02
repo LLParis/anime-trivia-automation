@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-
 PHASE_COLORS = {
     "STARTING": "#8b93a7",
     "LOADING": "#5b8def",

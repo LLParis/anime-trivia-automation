@@ -46,6 +46,20 @@ class NovelAnswerResolverTests(unittest.TestCase):
         resolver._ready = True
         return resolver
 
+    def test_query_planning_is_deterministic_and_needs_no_model_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            resolver = self.make_resolver(directory)
+            with mock.patch.object(resolver, "_chat_json") as chat:
+                queries = resolver._plan_queries(
+                    "A young woman who recruits two wandering swordsmen.",
+                    "character",
+                    "",
+                    time.perf_counter() + 5.0,
+                )
+            self.assertEqual(chat.call_count, 0)
+            self.assertGreaterEqual(len(queries), 2)
+            self.assertIn("anime character", queries[0])
+
     def test_grounded_answer_requires_typed_evidence_and_is_not_cached(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             resolver = self.make_resolver(directory)
@@ -71,17 +85,19 @@ class NovelAnswerResolverTests(unittest.TestCase):
                 mock.patch.object(
                     resolver,
                     "_synthesize",
-                    return_value={"answer": "attack on titan", "confidence": 0.98},
+                    return_value={
+                        "answer": "attack on titan",
+                        "alternatives": ["Girls Last Tour", "attack on titan"],
+                        "confidence": 0.98,
+                    },
                 ) as synthesize,
-                mock.patch.object(
-                    resolver,
-                    "_verify",
-                    return_value=("attack on titan", 0.97, "verified"),
-                ),
             ):
-                first = resolver.resolve('"Dedicate your hearts!"', "anime_title")
+                first = resolver.resolve_ranked('"Dedicate your hearts!"', "anime_title")
                 second = resolver.resolve('"Dedicate your hearts!"', "anime_title")
-            self.assertEqual(first, "Attack on Titan")
+            assert first is not None
+            self.assertEqual(first.answer, "Attack on Titan")
+            # Alternatives are canonicalized and deduplicated against the answer.
+            self.assertEqual(first.alternatives, ("Girls' Last Tour",))
             self.assertEqual(second, "Attack on Titan")
             self.assertEqual(synthesize.call_count, 2)
 
@@ -97,10 +113,7 @@ class NovelAnswerResolverTests(unittest.TestCase):
                 mock.patch.object(
                     resolver,
                     "_synthesize",
-                    return_value={"answer": "Wrong", "confidence": 0.60},
-                ),
-                mock.patch.object(
-                    resolver, "_verify", return_value=("Wrong", 0.60, "weak")
+                    return_value={"answer": "Wrong", "alternatives": [], "confidence": 0.60},
                 ),
             ):
                 self.assertIsNone(resolver.resolve("ambiguous clue", "anime_title"))

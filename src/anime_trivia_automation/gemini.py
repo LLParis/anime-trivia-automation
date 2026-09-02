@@ -13,10 +13,18 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictStr,
+    ValidationError,
+)
 from pydantic.functional_validators import model_validator
 
 from .config import GeminiConfig
+from .utils import describe_emoji
 
 LOGGER = logging.getLogger(__name__)
 
@@ -94,6 +102,9 @@ class GeminiResult:
     lane: GeminiLane
     latency_ms: float
     detail: str
+    # Runner-up candidates, best first; the app types them as follow-up
+    # guesses while the round stays open.
+    alternatives: tuple[str, ...] = ()
 
     @property
     def accepted(self) -> bool:
@@ -119,6 +130,7 @@ class _TriviaPayload(BaseModel):
     confidence_label: Literal["high", "medium", "low"]
     abstain: StrictBool
     evidence: StrictStr = Field(min_length=1, max_length=320)
+    alternatives: list[StrictStr] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="after")
     def validate_semantics(self) -> _TriviaPayload:
@@ -126,12 +138,7 @@ class _TriviaPayload(BaseModel):
             raise ValueError("an abstention cannot contain an answer")
         if not self.abstain and self.answer is None:
             raise ValueError("a non-abstention must contain an answer")
-        if self.confidence_label == "high" and self.confidence < 0.75:
-            raise ValueError("high confidence is inconsistent with its score")
-        if self.confidence_label == "medium" and not 0.35 <= self.confidence < 0.90:
-            raise ValueError("medium confidence is inconsistent with its score")
-        if self.confidence_label == "low" and self.confidence >= 0.75:
-            raise ValueError("low confidence is inconsistent with its score")
+        # Labels are advisory: the numeric confidence is what the app gates on.
         return self
 
 
@@ -160,6 +167,10 @@ class GeminiProvider:
         self._client: Any | None = None
         self._preflight_attempted = False
         self._preflight_lock = asyncio.Lock()
+        # Free-tier quota exhaustion returns RateLimitError on every call; once
+        # seen, stop offering this lane for a while instead of burning the
+        # round's deadline on it. Other providers keep answering meanwhile.
+        self._rate_limited_until = 0.0
         if not config.enabled:
             self._availability = GeminiAvailability(
                 phase="disabled",
@@ -178,6 +189,12 @@ class GeminiProvider:
     @property
     def availability(self) -> GeminiAvailability:
         return self._availability
+
+    RATE_LIMIT_COOLDOWN_SECONDS = 300.0
+
+    @property
+    def rate_limited(self) -> bool:
+        return time.monotonic() < self._rate_limited_until
 
     async def preflight(
         self, *, force: bool = False, deadline: float | None = None
@@ -238,7 +255,7 @@ class GeminiProvider:
                 model_name = str(getattr(model_record, "name", ""))
                 if not model_name.endswith(self._config.primary_model):
                     raise ValueError("Gemini preflight returned the wrong model")
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 await self._close_client()
                 self._availability = GeminiAvailability(
                     phase="unavailable",
@@ -323,7 +340,7 @@ class GeminiProvider:
                 deadline=deadline,
             )
             payload = _TriviaPayload.model_validate(self._decode_output(interaction))
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             return self._result(
                 request,
                 model=model,
@@ -341,13 +358,23 @@ class GeminiProvider:
                 detail=f"Gemini response failed validation ({type(exc).__name__})",
             )
         except Exception as exc:
-            LOGGER.warning("Gemini request failed (%s)", type(exc).__name__)
+            error_name = type(exc).__name__
+            LOGGER.warning("Gemini request failed (%s)", error_name)
+            folded = error_name.casefold()
+            if "ratelimit" in folded or "resourceexhausted" in folded:
+                self._rate_limited_until = (
+                    time.monotonic() + self.RATE_LIMIT_COOLDOWN_SECONDS
+                )
+                LOGGER.warning(
+                    "Gemini API quota is exhausted; lane parked for %.0f s",
+                    self.RATE_LIMIT_COOLDOWN_SECONDS,
+                )
             return self._result(
                 request,
                 model=model,
                 status="error",
                 started=started,
-                detail=f"Gemini request failed ({type(exc).__name__})",
+                detail=f"Gemini request failed ({error_name})",
             )
 
         if payload.answer_type != request.expected_answer_type:
@@ -382,10 +409,17 @@ class GeminiProvider:
                 confidence_label=payload.confidence_label,
                 detail="Gemini answer failed the safety sanitizer",
             )
-        if (
-            payload.confidence_label != "high"
-            or payload.confidence < float(self._config.min_confidence)
-        ):
+        alternatives: list[str] = []
+        seen = {answer.casefold()}
+        for candidate in payload.alternatives:
+            cleaned = self._sanitize_answer(candidate)
+            if cleaned is None or cleaned.casefold() in seen:
+                continue
+            seen.add(cleaned.casefold())
+            alternatives.append(cleaned)
+            if len(alternatives) >= int(self._config.max_alternatives):
+                break
+        if payload.confidence < float(self._config.min_confidence):
             return self._result(
                 request,
                 model=model,
@@ -394,6 +428,7 @@ class GeminiProvider:
                 confidence=payload.confidence,
                 confidence_label=payload.confidence_label,
                 detail="Gemini answer was below the live confidence threshold",
+                alternatives=tuple(alternatives),
             )
         return self._result(
             request,
@@ -403,7 +438,11 @@ class GeminiProvider:
             started=started,
             confidence=payload.confidence,
             confidence_label=payload.confidence_label,
-            detail="Gemini returned one high-confidence canonical answer",
+            detail=(
+                f"Gemini answered with {payload.confidence_label} confidence"
+                + (f" and {len(alternatives)} alternative(s)" if alternatives else "")
+            ),
+            alternatives=tuple(alternatives),
         )
 
     async def close(self) -> None:
@@ -468,23 +507,37 @@ class GeminiProvider:
             "Unknown Gemini model lane"
         )
 
+    @staticmethod
+    def describe_emoji(clue: str) -> str:
+        return describe_emoji(clue)
+
     def _build_input(self, request: GeminiRequest, clue: str) -> str | list[dict[str, str]]:
         answer_instruction = (
-            "the canonical full character name"
+            "the canonical full character name (given name and family name as the "
+            "English anime databases list it)"
             if request.expected_answer_type == "character"
             else "the canonical English anime title"
         )
+        alternatives_budget = int(self._config.max_alternatives)
+        emoji_reading = self.describe_emoji(clue)
         prompt = (
-            "You are a precision anime and manga trivia solver. This request is "
-            "ungrounded: do not use tools, web search, or external actions. Identify exactly "
-            f"{answer_instruction}. Never combine alternatives or return commentary in the "
-            "answer field. Inspect the attached cropped quiz clue when present. If the clue "
-            "is ambiguous, the type is uncertain, or you cannot identify one answer, set "
-            "abstain=true and answer=null. Confidence must reflect the evidence, not "
-            "popularity.\n\n"
+            "You are an expert anime and manga trivia solver competing in a speed quiz. "
+            "This request is ungrounded: do not use tools, web search, or external "
+            f"actions. Identify exactly {answer_instruction}. The clue is one of: a "
+            "character description paraphrased from an encyclopedia biography, an exact "
+            "quote from the series, or an emoji rebus whose symbol meanings combine into "
+            "the answer. Always put your single best answer in `answer` and up to "
+            f"{alternatives_budget} distinct runner-up candidates in `alternatives`, best "
+            "first, using the same canonical form. A plausible guess is always better "
+            "than abstaining: set abstain=true only if the clue is unreadable. "
+            "`confidence` is your calibrated probability that `answer` is correct. Never "
+            "combine alternatives or add commentary inside `answer`. Inspect the attached "
+            "cropped quiz clue when present.\n\n"
             f"Required answer_type: {request.expected_answer_type}\n"
             f"Quiz clue: {clue}"
         )
+        if emoji_reading:
+            prompt += f"\nEmoji in the clue, in order: {emoji_reading}"
         if request.image_bytes is None:
             if request.image_mime_type is not None:
                 raise ValueError("image_mime_type requires image_bytes")
@@ -579,7 +632,7 @@ class GeminiProvider:
         )
         try:
             return await asyncio.wait_for(call, timeout=remaining)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise TimeoutError("Gemini request exceeded its absolute deadline") from exc
 
     async def _get_model(self, model: str, deadline: float) -> Any:
@@ -591,7 +644,7 @@ class GeminiProvider:
         call = self._client.aio.models.get(model=model)
         try:
             return await asyncio.wait_for(call, timeout=remaining)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise TimeoutError("Gemini preflight exceeded its deadline") from exc
 
     @staticmethod
@@ -661,6 +714,7 @@ class GeminiProvider:
         answer: str | None = None,
         confidence: float = 0.0,
         confidence_label: GeminiConfidence | None = None,
+        alternatives: tuple[str, ...] = (),
     ) -> GeminiResult:
         return GeminiResult(
             status=status,
@@ -672,6 +726,7 @@ class GeminiProvider:
             lane=request.lane,
             latency_ms=self._elapsed_ms(started),
             detail=detail,
+            alternatives=alternatives,
         )
 
 

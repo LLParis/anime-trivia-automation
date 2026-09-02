@@ -5,8 +5,8 @@ import base64
 import json
 import time
 import unittest
-from unittest import mock
 from types import SimpleNamespace
+from unittest import mock
 
 from anime_trivia_automation.config import (
     AppConfig,
@@ -192,15 +192,16 @@ class GeminiProviderTests(unittest.TestCase):
             base64.b64encode(b"cropped-png").decode("ascii"),
         )
 
-    def test_type_mismatch_and_medium_confidence_fail_closed(self) -> None:
-        provider, _interactions, _factory = self.make_provider(
+    def test_type_mismatch_fails_closed_but_medium_confidence_answers(self) -> None:
+        provider, interactions, _factory = self.make_provider(
             [
                 {"ready": True},
                 _answer_payload(answer_type="character"),
-                _answer_payload(
-                    confidence=0.82,
-                    confidence_label="medium",
-                ),
+                {
+                    **_answer_payload(confidence=0.62, confidence_label="medium"),
+                    "alternatives": ["Attack on Titan", "Kabaneri", "Kabaneri", "@here"],
+                },
+                _answer_payload(confidence=0.20, confidence_label="low"),
             ]
         )
 
@@ -210,15 +211,27 @@ class GeminiProviderTests(unittest.TestCase):
                 GeminiRequest("Dedicate your hearts", "anime_title")
             )
             medium = await provider.resolve(
+                GeminiRequest('"Dedicate your hearts!" 🏍️', "anime_title")
+            )
+            low = await provider.resolve(
                 GeminiRequest("Dedicate your hearts", "anime_title")
             )
-            return wrong_type, medium
+            return wrong_type, medium, low
 
-        wrong_type, medium = asyncio.run(scenario())
+        wrong_type, medium, low = asyncio.run(scenario())
         self.assertEqual(wrong_type.status, "invalid_response")
         self.assertIsNone(wrong_type.answer)
-        self.assertEqual(medium.status, "abstained")
-        self.assertIsNone(medium.answer)
+        # Wrong guesses are free: a medium-confidence answer is submitted, and
+        # its distinct, sanitized alternatives ride along as follow-up guesses.
+        self.assertEqual(medium.status, "answered")
+        self.assertEqual(medium.answer, "Attack on Titan")
+        self.assertEqual(medium.alternatives, ("Kabaneri",))
+        # Below the configured floor the provider still abstains.
+        self.assertEqual(low.status, "abstained")
+        self.assertIsNone(low.answer)
+        prompt_text = interactions.calls[1]["input"]
+        self.assertIn("alternatives", prompt_text)
+        self.assertIn("motorcycle", prompt_text)
 
     def test_model_abstention_is_preserved(self) -> None:
         provider, _interactions, _factory = self.make_provider(

@@ -83,3 +83,6 @@ class AnswerTask:
     stage_timings_ms: dict[str, float] = field(default_factory=dict)
     round_token: str | None = None
     clue_fingerprint: str = ""
+    # 1 = first answer for this round; higher values are follow-up guesses that
+    # the dispatcher spaces out while the same card stays green.
+    guess_index: int = 1

@@ -150,6 +150,16 @@
     {"clue": "A hardworking high-school student who meets an older manga artist at a pizza restaurant and offers him steady encouragement.", "type": "character", "answer": "Airi Katagiri", "verification": "bot-reveal-transcript-2026-09-01-18"},
     {"clue": "Anya's wealthy and outspoken classmate who quickly declares herself Anya's best friend.", "type": "character", "answer": "Becky Blackbell", "verification": "bot-reveal-transcript-2026-09-01-18"},
     {"clue": "\"In the name of the Moon, I'll punish you!\"", "type": "anime_title", "answer": "Sailor Moon", "verification": "bot-reveal-transcript-2026-09-01-18"},
-    {"clue": "🏆 ⚔️ 🪄 👑", "type": "anime_title", "answer": "Fate Zero", "verification": "bot-reveal-transcript-2026-09-01-18"}
+    {"clue": "🏆 ⚔️ 🪄 👑", "type": "anime_title", "answer": "Fate Zero", "verification": "bot-reveal-transcript-2026-09-01-18"},
+    {"clue": "🤴 👂 🚫 👑 🗡️", "type": "anime_title", "answer": "Ranking of Kings", "verification": "user-live-capture-plus-reviewed-alternate-2026-09-02-07"},
+    {"clue": "👩 🎞️ 🛰️ ✏️ 💡", "type": "anime_title", "answer": "Keep Your Hands Off Eizouken", "verification": "user-corrected-manual-plus-reviewed-alternate-2026-09-02-07"},
+    {"clue": "🐉 ♨️ 👻 🐖", "type": "anime_title", "answer": "Spirited Away", "verification": "user-live-capture-plus-reviewed-alternate-2026-09-02-07"},
+    {"clue": "A small, sharp-tongued spirit librarian with drill-shaped twin tails who ends many sentences with \"I suppose.\"", "type": "character", "answer": "Beatrice", "verification": "distinctive-character-description-cross-check-2026-09-02-07"},
+    {"clue": "A mysterious mage with a horned animal skull for a head who purchases a red-haired apprentice at an auction.", "type": "character", "answer": "Elias Ainsworth", "verification": "user-live-capture-cross-check-2026-09-02-07"},
+    {"clue": "A self-proclaimed rival of an explosion-obsessed arch wizard who is powerful, easily embarrassed, and desperate to make friends.", "type": "character", "answer": "Yunyun", "verification": "user-live-capture-cross-check-2026-09-02-07"},
+    {"clue": "\"A believing heart is your magic.\"", "type": "anime_title", "answer": "Little Witch Academia", "verification": "user-live-capture-cross-check-2026-09-02-07"},
+    {"clue": "\"The net is vast and infinite.\"", "type": "anime_title", "answer": "Ghost in the Shell", "verification": "bot-reveal-transcript-2026-09-02-07"},
+    {"clue": "The warmhearted middle sister of the Kawamoto family who often encourages a lonely professional shogi player.", "type": "character", "answer": "Hinata Kawamoto", "verification": "bot-reveal-transcript-2026-09-02-07"},
+    {"clue": "🥘 🐉 🛡️ 🗺️", "type": "anime_title", "answer": "Delicious in Dungeon", "verification": "bot-reveal-transcript-2026-09-02-07"}
   ]
 }

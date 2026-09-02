@@ -6,6 +6,7 @@ import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+from anime_trivia_automation.app import AnimeTriviaAutomation
 from anime_trivia_automation.config import (
     AppConfig,
     CaptureConfig,
@@ -13,7 +14,6 @@ from anime_trivia_automation.config import (
     TypingConfig,
     validate_config,
 )
-from anime_trivia_automation.app import AnimeTriviaAutomation
 from anime_trivia_automation.discord import (
     DiscordQuestionLocator,
     normalize_composer_value,
@@ -73,13 +73,38 @@ class FakeGuard:
     def current(self) -> ForegroundWindow:
         return self.window
 
+    def expected_window(self) -> ForegroundWindow:
+        return self.window
+
+    @staticmethod
+    def idle_milliseconds() -> int:
+        return 10_000
+
+    def activate(self, _hwnd: int) -> bool:
+        return True
+
 
 class SwitchingGuard:
     discord = ForegroundWindow(1, 2, "Discord.exe", "Anime Soul - Discord")
     chrome = ForegroundWindow(3, 4, "chrome.exe", "Gemini")
 
-    def __init__(self) -> None:
+    def __init__(self, idle_ms: int = 0) -> None:
         self.window = self.chrome
+        self.idle_ms = idle_ms
+        self.activations: list[int] = []
+
+    def idle_milliseconds(self) -> int:
+        return self.idle_ms
+
+    def activate(self, hwnd: int) -> bool:
+        self.activations.append(hwnd)
+        if hwnd == self.discord.hwnd:
+            self.window = self.discord
+            return True
+        if hwnd == self.chrome.hwnd:
+            self.window = self.chrome
+            return True
+        return False
 
     def allowed(self) -> tuple[bool, str]:
         return self.validate(self.window)
@@ -198,7 +223,11 @@ class RecordingStatus:
 
 
 def make_executor(
-    active: ActivePromptState, composer: FakeComposer
+    active: ActivePromptState,
+    composer: FakeComposer,
+    *,
+    write_mode: str = "type",
+    auto_activate: bool = True,
 ) -> SafeKeyboardExecutor:
     executor = SafeKeyboardExecutor.__new__(SafeKeyboardExecutor)
     executor._config = TypingConfig(
@@ -206,7 +235,7 @@ def make_executor(
         expected_process_names=("Discord.exe",),
         expected_window_title_contains="Anime Soul - Discord",
         pre_delay_seconds=(0.0, 0.0),
-        key_delay_seconds=(0.005, 0.005),
+        key_delay_seconds=(0.001, 0.001),
         draft_while_locked=True,
         verify_composer=True,
         auto_focus_composer=True,
@@ -214,7 +243,11 @@ def make_executor(
         composer_name_prefix="Message #💜anime-chat",
         composer_class_fragment="slateTextArea",
         enter_after_open_slack_seconds=0.0,
+        composer_write_mode=write_mode,
+        auto_activate_discord=auto_activate,
+        activation_idle_ms=350,
     )
+    executor._activated_from = None
     executor._readiness_config = ReadinessConfig(
         require_green_outline=True,
         ready_wait_timeout_seconds=1.0,
@@ -239,10 +272,12 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertTrue(AnimeTriviaAutomation._is_final_question("Question 10/10"))
         self.assertTrue(AnimeTriviaAutomation._is_final_question("3/3"))
 
-    def test_new_session_requires_a_locked_first_question(self) -> None:
-        self.assertTrue(AnimeTriviaAutomation._is_new_quiz_start("1/10", "locked"))
-        self.assertFalse(AnimeTriviaAutomation._is_new_quiz_start("1/10", "ready"))
-        self.assertFalse(AnimeTriviaAutomation._is_new_quiz_start("5/10", "locked"))
+    def test_live_card_after_quiz_completion_starts_a_new_session(self) -> None:
+        # The old locked-Q1 latch ignored every live card of a quiz joined
+        # mid-way (2026-09-02 7 AM: Q7-Q10 dropped). Any red/green card now
+        # re-arms the worker; only grey cards are inert.
+        self.assertFalse(hasattr(AnimeTriviaAutomation, "_is_new_quiz_start"))
+        self.assertFalse(hasattr(AnimeTriviaAutomation, "_awaiting_quiz_start"))
 
     def test_short_quote_is_treated_as_text_for_reveal_learning(self) -> None:
         self.assertEqual(
@@ -536,7 +571,7 @@ class LiveRegressionTests(unittest.TestCase):
         signature = "round:anime_title:1/10"
         active.update(signature, "locked", 1)
         composer = FakeComposer()
-        executor = make_executor(active, composer)
+        executor = make_executor(active, composer, write_mode="uia")
         recording = RecordingStatus()
         executor._status = recording
         task = AnswerTask(
@@ -811,7 +846,7 @@ class LiveRegressionTests(unittest.TestCase):
         signature = "round:anime_title:1/10"
         active.update(signature, "ready", 1, "text:known")
         composer = FakeComposer()
-        executor = make_executor(active, composer)
+        executor = make_executor(active, composer, write_mode="uia")
         task = AnswerTask(
             answer="Fruits Basket",
             prompt_signature=signature,
@@ -897,11 +932,13 @@ class LiveRegressionTests(unittest.TestCase):
         executor.observe_prompt(signature, corrected.clue_fingerprint)
         self.assertTrue(executor.is_suppressed(corrected))
 
-    def test_queued_correction_cannot_send_after_round_was_answered(self) -> None:
+    def test_corrected_answer_is_sent_as_a_follow_up_guess_after_the_gap(self) -> None:
         active = ActivePromptState()
         stop_event = threading.Event()
         executor = BlockingExecutor(first_result=True)
-        dispatcher = AnswerDispatcher(executor, active, stop_event)  # type: ignore[arg-type]
+        dispatcher = AnswerDispatcher(
+            executor, active, stop_event, guess_gap_seconds=0.05  # type: ignore[arg-type]
+        )
         dispatcher.start()
         signature = "round:anime_title:1/10"
         dispatcher.observe_prompt(signature, "ready", 1, "text:a")
@@ -922,10 +959,190 @@ class LiveRegressionTests(unittest.TestCase):
         second = AnswerTask(**{**first.__dict__, "answer": "Second", "clue_fingerprint": "text:b"})
         self.assertTrue(dispatcher.submit(second))
         executor.release_first.set()
-        time.sleep(0.15)
+        self.assertTrue(executor.second_finished.wait(1.0))
         stop_event.set()
         dispatcher.join(1.0)
-        self.assertEqual([task.answer for task in executor.calls], ["First"])
+        # Wrong guesses are free: a different answer for the same open round is
+        # typed as guess 2 once the gap has elapsed.
+        self.assertEqual([task.answer for task in executor.calls], ["First", "Second"])
+
+    def test_same_answer_is_never_resent_and_ladder_is_capped(self) -> None:
+        active = ActivePromptState()
+        stop_event = threading.Event()
+        executor = BlockingExecutor(first_result=True)
+        dispatcher = AnswerDispatcher(
+            executor,  # type: ignore[arg-type]
+            active,
+            stop_event,
+            max_guesses_per_round=2,
+            guess_gap_seconds=0.0,
+        )
+        dispatcher.start()
+        signature = "round:character:3/10"
+        dispatcher.observe_prompt(signature, "ready", 1, "text:a")
+        first = AnswerTask(
+            answer="Fuu Kasumi",
+            prompt_signature=signature,
+            expected_answer_type="character",
+            question_label="3/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="test",
+            round_token="session-1:round-3",
+            clue_fingerprint="text:a",
+        )
+        self.assertTrue(dispatcher.submit(first))
+        self.assertTrue(executor.first_started.wait(0.5))
+        duplicate = AnswerTask(**{**first.__dict__, "answer": "fuu kasumi"})
+        self.assertFalse(dispatcher.submit(duplicate))
+        second = AnswerTask(**{**first.__dict__, "answer": "Mugen", "guess_index": 2})
+        self.assertTrue(dispatcher.submit(second))
+        third = AnswerTask(**{**first.__dict__, "answer": "Jin", "guess_index": 3})
+        self.assertFalse(dispatcher.submit(third))
+        executor.release_first.set()
+        self.assertTrue(executor.second_finished.wait(1.0))
+        stop_event.set()
+        dispatcher.join(1.0)
+        self.assertEqual(
+            [task.answer for task in executor.calls], ["Fuu Kasumi", "Mugen"]
+        )
+
+    def test_follow_up_guess_is_dropped_when_the_round_closes(self) -> None:
+        active = ActivePromptState()
+        stop_event = threading.Event()
+        executor = BlockingExecutor(first_result=True)
+        dispatcher = AnswerDispatcher(
+            executor, active, stop_event, guess_gap_seconds=0.3  # type: ignore[arg-type]
+        )
+        dispatcher.start()
+        signature = "round:anime_title:4/10"
+        dispatcher.observe_prompt(signature, "ready", 1, "text:a")
+        first = AnswerTask(
+            answer="Bleach",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="4/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="test",
+            round_token="session-1:round-4",
+            clue_fingerprint="text:a",
+        )
+        self.assertTrue(dispatcher.submit(first))
+        self.assertTrue(executor.first_started.wait(0.5))
+        second = AnswerTask(**{**first.__dict__, "answer": "Naruto", "guess_index": 2})
+        self.assertTrue(dispatcher.submit(second))
+        executor.release_first.set()
+        time.sleep(0.05)
+        dispatcher.observe_prompt(signature, "closed", 2, "text:a")
+        time.sleep(0.4)
+        stop_event.set()
+        dispatcher.join(1.0)
+        self.assertEqual([task.answer for task in executor.calls], ["Bleach"])
+
+    def test_idle_operator_gets_discord_raised_and_focus_returned(self) -> None:
+        active = ActivePromptState()
+        signature = "round:anime_title:1/10"
+        active.update(signature, "ready", 1, "text:known")
+        composer = FakeComposer()
+        executor = make_executor(active, composer)
+        guard = SwitchingGuard(idle_ms=2000)
+        executor._guard = guard
+        task = AnswerTask(
+            answer="Fruits Basket",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="1/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="history-cache",
+            clue_fingerprint="text:known",
+        )
+        self.assertTrue(executor.execute(task))
+        self.assertTrue(executor._controller.entered)
+        # Discord was raised for the send, then Chrome got focus back.
+        self.assertEqual(guard.activations, [guard.discord.hwnd, guard.chrome.hwnd])
+        self.assertEqual(guard.window, guard.chrome)
+
+    def test_active_operator_is_never_interrupted_by_activation(self) -> None:
+        active = ActivePromptState()
+        signature = "round:anime_title:1/10"
+        active.update(signature, "ready", 1, "text:known")
+        composer = FakeComposer()
+        executor = make_executor(active, composer)
+        executor._config = TypingConfig(
+            **{**executor._config.__dict__, "foreground_wait_timeout_seconds": 0.2}
+        )
+        guard = SwitchingGuard(idle_ms=0)
+        executor._guard = guard
+        task = AnswerTask(
+            answer="Fruits Basket",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="1/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="history-cache",
+            clue_fingerprint="text:known",
+        )
+        self.assertFalse(executor.execute(task))
+        self.assertEqual(guard.activations, [])
+        self.assertFalse(executor._controller.entered)
+
+    def test_keystroke_commit_types_full_answer_after_green_then_enters(self) -> None:
+        active = ActivePromptState()
+        signature = "round:character:2/10"
+        active.update(signature, "locked", 1)
+        composer = FakeComposer()
+        executor = make_executor(active, composer)
+        task = AnswerTask(
+            answer="Fuu Kasumi",
+            prompt_signature=signature,
+            expected_answer_type="character",
+            question_label="2/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=5.0,
+            source="gemini-3.7-structured",
+        )
+        result: list[bool] = []
+        thread = threading.Thread(target=lambda: result.append(executor.execute(task)))
+        thread.start()
+        time.sleep(0.05)
+        self.assertEqual(executor._controller.type_calls, [])
+        active.update(signature, "ready", 2)
+        thread.join(1.0)
+        self.assertEqual(result, [True])
+        self.assertEqual("".join(executor._controller.type_calls), task.answer)
+        self.assertEqual(composer.set_values, [])
+        self.assertTrue(executor._controller.entered)
+        self.assertEqual(composer.text, "")
+
+    def test_keystroke_commit_stops_when_a_human_types_into_the_draft(self) -> None:
+        active = ActivePromptState()
+        signature = "round:character:2/10"
+        active.update(signature, "ready", 1)
+        composer = FakeComposer()
+        executor = make_executor(active, composer)
+
+        class InterferingController(FakeController):
+            def type(self, character: str) -> None:
+                super().type(character)
+                if len(self.composer.text) == 3:
+                    self.composer.text += "x"
+
+        executor._controller = InterferingController(composer, executor._enter_key)
+        task = AnswerTask(
+            answer="Fuu Kasumi",
+            prompt_signature=signature,
+            expected_answer_type="character",
+            question_label="2/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="gemini-3.7-structured",
+        )
+        self.assertFalse(executor.execute(task))
+        self.assertFalse(executor._controller.entered)
+        self.assertEqual(composer.text, "Fuux")
 
     def test_latest_only_dispatch_replaces_stale_fingerprint_variants(self) -> None:
         active = ActivePromptState()
@@ -1030,7 +1247,7 @@ class LiveRegressionTests(unittest.TestCase):
         signature = "round:anime_title:1/10"
         active.update(signature, "ready", 1, "text:known")
         composer = FakeComposer()
-        executor = make_executor(active, composer)
+        executor = make_executor(active, composer, write_mode="uia")
         executor._config = TypingConfig(
             **{
                 **executor._config.__dict__,
@@ -1066,7 +1283,7 @@ class LiveRegressionTests(unittest.TestCase):
         signature = "round:anime_title:1/10"
         active.update(signature, "ready", 1, "text:known")
         composer = FakeComposer()
-        executor = make_executor(active, composer)
+        executor = make_executor(active, composer, write_mode="uia")
         executor._config = TypingConfig(
             **{
                 **executor._config.__dict__,
@@ -1136,7 +1353,7 @@ class LiveRegressionTests(unittest.TestCase):
         signature = "round:character:1/10"
         active.update(signature, "ready", 1)
         composer = AmbiguousAtomicComposer()
-        executor = make_executor(active, composer)
+        executor = make_executor(active, composer, write_mode="uia")
         task = AnswerTask(
             answer="Rei Kiriyama",
             prompt_signature=signature,

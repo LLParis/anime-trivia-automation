@@ -9,7 +9,6 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-
 LOGGER = logging.getLogger(__name__)
 
 _STOP_WORDS = {
@@ -327,8 +326,8 @@ class KnowledgeIndex:
             )
         )
 
-    def __enter__(self) -> "KnowledgeIndex":
+    def __enter__(self) -> KnowledgeIndex:
         return self
 
-    def __exit__(self, *_args: Any) -> None:
+    def __exit__(self, *_args: object) -> None:
         self.close()

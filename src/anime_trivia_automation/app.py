@@ -10,18 +10,17 @@ import time
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from dataclasses import dataclass, field
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .cache import TriviaCache
-from .capture import DXCapture, GpuFrameChangeGate
-from .config import AppConfig
 from .antigravity import (
     AntigravityProvider,
     AntigravityRequest,
 )
+from .cache import TriviaCache
+from .capture import DXCapture, GpuFrameChangeGate
+from .config import AppConfig
 from .discord import DiscordQuestionLocator
 from .gemini import GeminiProvider, GeminiRequest, GeminiResult
 from .models import AnswerTask, CacheHit, PromptObservation, Scene
@@ -73,6 +72,7 @@ class ResolutionRequest:
     clue: str
     observation: PromptObservation
     started_at: float
+    semantic_clue: bool = False
 
 
 @dataclass(frozen=True)
@@ -85,6 +85,9 @@ class ProviderResolution:
     elapsed_ms: float
     detail: str = ""
     error: str | None = None
+    # Lower-ranked answers the provider also considered plausible. They become
+    # follow-up guesses because a wrong guess costs nothing in Anime Soul.
+    alternatives: tuple[str, ...] = ()
 
 
 @dataclass
@@ -96,10 +99,13 @@ class AsyncResolutionRound:
     extract_ms: float
     lookup_ms: float
     results: dict[str, ProviderResolution] = field(default_factory=dict)
+    # Distinct answers in arrival order. guesses[0] is the first submission;
+    # the rest are typed only while the same card is still green.
+    guesses: list[ProviderResolution] = field(default_factory=list)
+    queued_answers: set[str] = field(default_factory=set)
     candidate: ProviderResolution | None = None
     queued: bool = False
     unknown_emitted: bool = False
-    conflicted: bool = False
     fallback_started: bool = False
     retired: bool = False
 
@@ -186,7 +192,6 @@ class AnimeTriviaAutomation:
         self._pending_round: PendingRound | None = None
         self._ephemeral_answer: tuple[str, str, str, str] | None = None
         self._quiz_ended = False
-        self._awaiting_quiz_start = True
         self._accessible_round: tuple[str, str] | None = None
         self._vlm = LazyQwenResolver(config.vlm)
         self._novel = NovelAnswerResolver(config.novel)
@@ -206,7 +211,11 @@ class AnimeTriviaAutomation:
             status=self._status,
         )
         self._dispatcher = AnswerDispatcher(
-            self._keyboard, self._active_prompt, self._stop_event
+            self._keyboard,
+            self._active_prompt,
+            self._stop_event,
+            max_guesses_per_round=config.typing.max_guesses_per_round,
+            guess_gap_seconds=config.typing.guess_gap_seconds,
         )
         self._capture = DXCapture(
             config.capture,
@@ -437,18 +446,15 @@ class AnimeTriviaAutomation:
             )
             return
 
-        if self._awaiting_quiz_start and observation.readiness in {"locked", "ready"}:
-            if not self._is_new_quiz_start(
-                observation.question_label, observation.readiness
-            ):
-                LOGGER.info(
-                    "Ignored live-looking card while awaiting a new locked Q1: %s %s",
-                    observation.question_label,
-                    observation.readiness,
-                )
-                return
-            LOGGER.info("First locked card observed; starting a new quiz session")
-            self._awaiting_quiz_start = False
+        if self._quiz_ended and observation.readiness in {"locked", "ready"}:
+            # A red or green card is always the live round: finished rounds are
+            # grey. Any live card therefore starts the next quiz session, even
+            # when the worker was launched mid-quiz. (A locked-Q1-only latch
+            # silently dropped Q7-Q10 of the 2026-09-02 7 AM quiz.)
+            LOGGER.info(
+                "Live card %s observed after quiz completion; starting a new session",
+                observation.question_label or "?",
+            )
             self._quiz_ended = False
         self._save_prompt_crop(observation)
         # A round signature is intentionally stable across OCR edits, so a UIA
@@ -665,18 +671,42 @@ class AnimeTriviaAutomation:
         self, observation: PromptObservation, clue: str
     ) -> set[str]:
         providers: set[str] = set()
-        if self._config.novel.enabled and clue not in {
+        placeholders = {
             "Visual / emoji clue",
             "<visual/emoji>",
-        }:
-            providers.add("qwen")
+        }
+        semantic_clue = bool(
+            observation.prompt_kind == "text"
+            or (
+                self._accessible_round is not None
+                and self._accessible_round[0] == observation.signature
+                and clue not in placeholders
+            )
+        )
+        antigravity_ready = bool(
+            self._config.antigravity.enabled
+            and self._antigravity.availability.available
+        )
         gemini_config = getattr(self._config, "gemini", None)
-        if (
+        gemini_ready = bool(
             gemini_config is not None
             and gemini_config.enabled
             and getattr(self, "_gemini", None) is not None
             and self._gemini.availability.available
-        ):
+            and not self._gemini.rate_limited
+        )
+        # Account-auth Gemini 3.7 is the measured low-latency primary for any
+        # clue Discord exposes semantically, including emoji sequences. Local
+        # Qwen is retained as a secondary only when this lane abstains or is
+        # unavailable. The rate-limited API remains a raw-image fallback.
+        if semantic_clue:
+            if antigravity_ready:
+                providers.add("antigravity")
+            if self._config.novel.enabled and self._novel.ready_for_resolve:
+                providers.add("qwen")
+            if not providers and gemini_ready:
+                providers.add("gemini")
+        elif gemini_ready:
             providers.add("gemini")
         if self._config.vlm.allow_unverified_submission and not (
             observation.prompt_kind == "visual"
@@ -698,6 +728,14 @@ class AnimeTriviaAutomation:
         lookup_ms: float,
     ) -> AsyncResolutionRound:
         providers = self._enabled_resolution_providers(observation, clue)
+        semantic_clue = bool(
+            observation.prompt_kind == "text"
+            or (
+                self._accessible_round is not None
+                and self._accessible_round[0] == observation.signature
+                and clue not in {"Visual / emoji clue", "<visual/emoji>"}
+            )
+        )
         request = ResolutionRequest(
             key=key,
             round_token=round_token,
@@ -706,6 +744,7 @@ class AnimeTriviaAutomation:
             clue=clue,
             observation=observation,
             started_at=time.perf_counter(),
+            semantic_clue=semantic_clue,
         )
         state = AsyncResolutionRound(
             request=request,
@@ -714,6 +753,7 @@ class AnimeTriviaAutomation:
             ocr_ms=ocr_ms,
             extract_ms=extract_ms,
             lookup_ms=lookup_ms,
+            fallback_started="antigravity" in providers,
         )
         self._resolution_rounds[key] = state
         if not providers:
@@ -790,6 +830,7 @@ class AnimeTriviaAutomation:
     ) -> ProviderResolution:
         started = time.perf_counter()
         answer: str | None = None
+        alternatives: tuple[str, ...] = ()
         confidence = 0.0
         detail = ""
         source = f"{provider}-resolver"
@@ -806,16 +847,20 @@ class AnimeTriviaAutomation:
                         + float(self._config.novel.total_timeout_seconds)
                     ):
                         raise TimeoutError("local resolver request expired in queue")
-                    answer = self._novel.resolve(
+                    ranked = self._novel.resolve_ranked(
                         request.clue,
                         request.observation.expected_answer_type,
                     )
+                    if ranked is not None:
+                        answer = ranked.answer
+                        alternatives = ranked.alternatives
                     confidence = self._novel.last_confidence
                     detail = self._novel.last_detail
                 elif provider == "gemini":
                     source = "gemini-3.7-structured"
                     gemini_result = self._resolve_with_gemini(request)
                     answer = gemini_result.answer if gemini_result.accepted else None
+                    alternatives = tuple(gemini_result.alternatives)
                     confidence = gemini_result.confidence
                     detail = gemini_result.detail
                 elif provider == "antigravity":
@@ -838,7 +883,11 @@ class AnimeTriviaAutomation:
                                     expected_answer_type=(
                                         request.observation.expected_answer_type
                                     ),
-                                    prompt_kind=request.observation.prompt_kind,
+                                    prompt_kind=(
+                                        "text"
+                                        if request.semantic_clue
+                                        else request.observation.prompt_kind
+                                    ),
                                     deadline=(
                                         request.started_at
                                         + float(
@@ -879,6 +928,7 @@ class AnimeTriviaAutomation:
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
             detail=detail,
             error=error,
+            alternatives=alternatives if answer is not None else (),
         )
 
     def _resolve_with_gemini(self, request: ResolutionRequest) -> GeminiResult:
@@ -897,6 +947,8 @@ class AnimeTriviaAutomation:
                     image_mime_type = "image/png"
             except Exception:
                 LOGGER.debug("Gemini prompt-crop encoding failed", exc_info=True)
+        if request.observation.prompt_kind == "visual" and image_bytes is None:
+            raise ValueError("visual resolver has no encoded prompt crop")
         request_timeout = (
             float(self._config.gemini.total_timeout_seconds)
             if request.observation.prompt_kind == "visual"
@@ -1035,105 +1087,102 @@ class AnimeTriviaAutomation:
             if not state.pending:
                 self._resolution_rounds.pop(result.key, None)
             return
+
+        # A wrong guess costs nothing in Anime Soul, while waiting for the
+        # slowest provider costs the round. The first answer to arrive is
+        # queued immediately; every later distinct answer (from another
+        # provider or from a provider's own alternatives) becomes a follow-up
+        # guess that the dispatcher spaces out while the card stays green.
+        added = self._add_resolution_guesses(state, result)
+        if added:
+            self._announce_resolution_guesses(state, added)
+            self._queue_resolution_candidate(state)
         if state.pending:
             return
-
-        answered = [item for item in state.results.values() if item.answer is not None]
-        answers_by_key: dict[str, list[ProviderResolution]] = {}
-        for item in answered:
-            answers_by_key.setdefault(normalize_question(item.answer or ""), []).append(item)
-        if not answered and self._maybe_start_antigravity_fallback(
-            state, reason="Primary resolvers abstained or were unavailable"
-        ):
-            return
-        if len(answers_by_key) > 1:
-            ranked_groups = sorted(
-                answers_by_key.values(), key=len, reverse=True
-            )
+        if not state.guesses:
             if (
-                len(ranked_groups[0]) >= 2
-                and len(ranked_groups[0]) > len(answered) / 2
+                "antigravity" in state.providers
+                and self._maybe_start_qwen_fallback(
+                    state, reason="Antigravity abstained or was unavailable"
+                )
             ):
-                answered = ranked_groups[0]
-                answers_by_key = {
-                    normalize_question(answered[0].answer or ""): answered
-                }
-            else:
-                state.conflicted = True
-                state.unknown_emitted = True
-                previous_resolution = self._status_resolution.get(
-                    state.request.round_token
-                )
-                self._status_resolution[state.request.round_token] = "unknown"
-                LOGGER.warning(
-                    "Resolver disagreement for %s; no answer will be submitted",
-                    state.request.observation.question_label or "?",
-                )
-                if self._active_resolution_key == state.request.key:
-                    self._status.emit(
-                        "ATTENTION",
-                        title=(
-                            f"Resolvers disagree — "
-                            f"{state.request.observation.question_label or 'Question'}"
-                        ),
-                        detail=(
-                            "Gemini, local, and account evidence remain split; "
-                            "manual answer required"
-                        ),
-                        question=state.request.observation.question_label or "Question",
-                        clue=state.request.clue,
-                        answer="SKIP",
-                        source="resolver disagreement",
-                        readiness=state.request.observation.readiness,
-                        event_id=f"{state.request.round_token}:disagreement",
-                        increment="unknown" if previous_resolution is None else None,
-                    )
                 return
+            if self._maybe_start_antigravity_fallback(
+                state, reason="Primary resolvers abstained or were unavailable"
+            ):
+                return
+        self._emit_unknown_if_complete(state)
 
-        if answered:
-            # Prefer the frontier Gemini spelling when providers agree; if only
-            # one provider answered, its strict high-confidence gate already
-            # passed and every other provider explicitly abstained/failed.
-            state.candidate = max(
-                answered,
-                key=lambda item: (
-                    item.provider == "gemini",
-                    item.confidence,
-                    -item.elapsed_ms,
-                ),
+    def _add_resolution_guesses(
+        self, state: AsyncResolutionRound, result: ProviderResolution
+    ) -> list[ProviderResolution]:
+        """Append the result's distinct answers to the round's guess ladder."""
+
+        if result.answer is None:
+            return []
+        added: list[ProviderResolution] = []
+        seen = {normalize_question(guess.answer or "") for guess in state.guesses}
+        ordered = [(result.answer, result.confidence, "")]
+        for index, alternative in enumerate(result.alternatives, start=1):
+            ordered.append((alternative, 0.0, f"alternative {index}"))
+        for answer, confidence, note in ordered:
+            cleaned = sanitize_answer(answer, self._config.typing.max_answer_characters)
+            if cleaned is None:
+                continue
+            normalized = normalize_question(cleaned)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            guess = replace(
+                result,
+                answer=cleaned,
+                confidence=confidence,
+                alternatives=(),
+                detail=f"{result.detail} ({note})" if note else result.detail,
             )
-            candidate = state.candidate
-            assert candidate.answer is not None
-            if self._active_resolution_key == state.request.key:
-                self._ephemeral_answer = (
-                    state.request.signature,
-                    state.request.clue_fingerprint,
-                    candidate.answer,
-                    candidate.source,
-                )
-                previous_resolution = self._status_resolution.get(
-                    state.request.round_token
-                )
-                self._status_resolution[state.request.round_token] = "known"
-                confidence = (
-                    f", {candidate.confidence:.0%}"
-                    if candidate.confidence > 0
-                    else ""
-                )
+            state.guesses.append(guess)
+            added.append(guess)
+        if state.candidate is None and state.guesses:
+            state.candidate = state.guesses[0]
+        return added
+
+    def _announce_resolution_guesses(
+        self, state: AsyncResolutionRound, added: list[ProviderResolution]
+    ) -> None:
+        if self._active_resolution_key != state.request.key:
+            return
+        first = state.guesses[0]
+        assert first.answer is not None
+        if self._ephemeral_answer is None or self._ephemeral_answer[0:2] != (
+            state.request.signature,
+            state.request.clue_fingerprint,
+        ):
+            self._ephemeral_answer = (
+                state.request.signature,
+                state.request.clue_fingerprint,
+                first.answer,
+                first.source,
+            )
+        previous_resolution = self._status_resolution.get(state.request.round_token)
+        self._status_resolution[state.request.round_token] = "known"
+        question = state.request.observation.question_label or "Question"
+        for guess in added:
+            position = state.guesses.index(guess) + 1
+            confidence = (
+                f", {guess.confidence:.0%}" if guess.confidence > 0 else ""
+            )
+            if position == 1:
                 self._status.emit(
                     "NOVEL",
-                    title=(
-                        f"New answer — "
-                        f"{state.request.observation.question_label or 'Question'}"
-                    ),
+                    title=f"New answer — {question}",
                     detail=(
-                        f"Providers finalized in {candidate.elapsed_ms:.0f} ms"
+                        f"{guess.provider} answered in {guess.elapsed_ms:.0f} ms"
                         f"{confidence}"
                     ),
-                    question=state.request.observation.question_label or "Question",
+                    question=question,
                     clue=state.request.clue,
-                    answer=candidate.answer,
-                    source=candidate.source,
+                    answer=guess.answer,
+                    source=guess.source,
                     readiness=state.request.observation.readiness,
                     event_id=state.request.round_token,
                     increment="known" if previous_resolution != "known" else None,
@@ -1141,8 +1190,22 @@ class AnimeTriviaAutomation:
                         "unknown" if previous_resolution == "unknown" else None
                     ),
                 )
-        self._queue_resolution_candidate(state)
-        self._emit_unknown_if_complete(state)
+                previous_resolution = "known"
+            else:
+                self._status.emit(
+                    "NOVEL",
+                    title=f"Follow-up guess {position} — {question}",
+                    detail=(
+                        f"{guess.provider} disagrees or offered an alternative"
+                        f"{confidence}; queued behind the first answer"
+                    ),
+                    question=question,
+                    clue=state.request.clue,
+                    answer=guess.answer,
+                    source=guess.source,
+                    readiness=state.request.observation.readiness,
+                    event_id=f"{state.request.round_token}:guess{position}",
+                )
 
     def _maybe_start_antigravity_fallback(
         self, state: AsyncResolutionRound, *, reason: str
@@ -1158,7 +1221,7 @@ class AnimeTriviaAutomation:
             or not self._active_prompt.is_open(
                 state.request.signature, state.request.clue_fingerprint
             )
-            or state.request.observation.prompt_kind != "text"
+            or not state.request.semantic_clue
             or not self._config.antigravity.enabled
             or not self._antigravity.availability.available
         ):
@@ -1187,9 +1250,48 @@ class AnimeTriviaAutomation:
         self._submit_resolution_provider("antigravity", fallback_request)
         return True
 
+    def _maybe_start_qwen_fallback(
+        self, state: AsyncResolutionRound, *, reason: str
+    ) -> bool:
+        if (
+            "qwen" in state.providers
+            or state.retired
+            or self._stop_event.is_set()
+            or self._quiz_ended
+            or self._active_resolution_key != state.request.key
+            or self._active_status_token != state.request.round_token
+            or self._active_status_closed
+            or not self._active_prompt.is_open(
+                state.request.signature, state.request.clue_fingerprint
+            )
+            or not state.request.semantic_clue
+            or not self._config.novel.enabled
+        ):
+            return False
+        state.providers.add("qwen")
+        state.pending.add("qwen")
+        self._status.emit(
+            "RESOLVING",
+            title=(
+                f"Using local fallback — "
+                f"{state.request.observation.question_label or 'Question'}"
+            ),
+            detail=f"{reason}; asking local Qwen3.8",
+            question=state.request.observation.question_label or "Question",
+            clue=state.request.clue,
+            answer="—",
+            source="local Qwen fallback",
+            readiness=state.request.observation.readiness,
+            event_id=f"{state.request.round_token}:qwen-fallback",
+        )
+        fallback_request = replace(state.request, started_at=time.perf_counter())
+        self._submit_resolution_provider("qwen", fallback_request)
+        return True
+
     def _queue_resolution_candidate(self, state: AsyncResolutionRound) -> bool:
-        candidate = state.candidate
-        if state.retired or state.queued or candidate is None or candidate.answer is None:
+        """Queue every not-yet-queued guess for the still-live round."""
+
+        if state.retired or not state.guesses:
             return False
         if (
             self._active_resolution_key != state.request.key
@@ -1201,19 +1303,33 @@ class AnimeTriviaAutomation:
             )
         ):
             return False
-        state.queued = self._queue_answer_if_current(
-            answer=candidate.answer,
-            source=candidate.source,
-            observation=state.request.observation,
-            clue_fingerprint=state.request.clue_fingerprint,
-            round_token=state.request.round_token,
-            detected_at=state.request.observation.scene.detected_at,
-            ocr_ms=state.ocr_ms,
-            extract_ms=state.extract_ms,
-            lookup_ms=state.lookup_ms,
-            provider_ms=candidate.elapsed_ms,
-        )
-        return state.queued
+        queued_any = False
+        for position, guess in enumerate(state.guesses, start=1):
+            assert guess.answer is not None
+            normalized = normalize_question(guess.answer)
+            if normalized in state.queued_answers:
+                continue
+            if position > self._config.typing.max_guesses_per_round:
+                break
+            queued = self._queue_answer_if_current(
+                answer=guess.answer,
+                source=guess.source,
+                observation=state.request.observation,
+                clue_fingerprint=state.request.clue_fingerprint,
+                round_token=state.request.round_token,
+                detected_at=state.request.observation.scene.detected_at,
+                ocr_ms=state.ocr_ms,
+                extract_ms=state.extract_ms,
+                lookup_ms=state.lookup_ms,
+                provider_ms=guess.elapsed_ms,
+                guess_index=position,
+            )
+            if not queued:
+                break
+            state.queued_answers.add(normalized)
+            queued_any = True
+        state.queued = bool(state.queued_answers)
+        return queued_any
 
     def _queue_answer_if_current(
         self,
@@ -1228,6 +1344,7 @@ class AnimeTriviaAutomation:
         extract_ms: float,
         lookup_ms: float,
         provider_ms: float,
+        guess_index: int = 1,
     ) -> bool:
         if (
             self._active_status_token != round_token
@@ -1255,11 +1372,13 @@ class AnimeTriviaAutomation:
             stage_timings_ms=timings,
             round_token=round_token,
             clue_fingerprint=clue_fingerprint,
+            guess_index=guess_index,
         )
         queued = self._dispatcher.submit(task)
         if queued:
             LOGGER.info(
-                "Answer queued: %s (processing %.1fms, provider %.1fms)",
+                "Answer queued (guess %d): %s (processing %.1fms, provider %.1fms)",
+                guess_index,
                 answer,
                 ocr_ms + extract_ms + lookup_ms,
                 provider_ms,
@@ -1267,12 +1386,7 @@ class AnimeTriviaAutomation:
         return queued
 
     def _emit_unknown_if_complete(self, state: AsyncResolutionRound) -> None:
-        if (
-            state.retired
-            or state.pending
-            or state.candidate is not None
-            or state.unknown_emitted
-        ):
+        if state.retired or state.pending or state.guesses or state.unknown_emitted:
             return
         if (
             self._active_resolution_key != state.request.key
@@ -1323,7 +1437,6 @@ class AnimeTriviaAutomation:
         if self._quiz_ended:
             return
         self._quiz_ended = True
-        self._awaiting_quiz_start = True
         self._pending_round = None
         self._ephemeral_answer = None
         self._accessible_round = None
@@ -1357,17 +1470,6 @@ class AnimeTriviaAutomation:
             return False
         match = re.search(r"\b(\d+)\s*/\s*(\d+)\b", question_label)
         return bool(match and int(match.group(1)) == int(match.group(2)))
-
-    @staticmethod
-    def _is_first_question(question_label: str | None) -> bool:
-        if not question_label:
-            return False
-        match = re.search(r"\b(\d+)\s*/\s*(\d+)\b", question_label)
-        return bool(match and int(match.group(1)) == 1)
-
-    @classmethod
-    def _is_new_quiz_start(cls, question_label: str | None, readiness: str) -> bool:
-        return readiness == "locked" and cls._is_first_question(question_label)
 
     @staticmethod
     def _effective_prompt_kind(prompt_kind: str, clue: str) -> str:
@@ -1760,9 +1862,15 @@ class AnimeTriviaAutomation:
                 readiness="unknown",
             )
             if not self._novel.ensure_ready():
-                raise RuntimeError(
-                    "Qwen3.8 novel solver failed startup preflight: "
-                    f"{self._novel.last_detail}"
+                LOGGER.warning(
+                    "Qwen3.8 fallback unavailable: %s", self._novel.last_detail
+                )
+                self._status.emit(
+                    "ATTENTION",
+                    title="Local Qwen unavailable — account solver remains active",
+                    detail=self._novel.last_detail,
+                    readiness="unknown",
+                    event_id="qwen-unavailable",
                 )
         if self._config.gemini.enabled:
             self._start_gemini_event_loop()

@@ -34,6 +34,49 @@ class NullStatus:
         return
 
 
+class RoundLedger:
+    """Append-only JSONL record of every operator event with wall-clock stamps.
+
+    The panel only shows the latest state; this file is what lets a failed
+    quiz be reconstructed afterwards (which clue, which resolver, which answer,
+    how long each stage took, whether Enter was sent, what the bot revealed).
+    Writes are best-effort and can never interrupt the live pipeline.
+    """
+
+    def __init__(self, path: Path | None) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._handle: Any | None = None
+        self._failed = path is None
+
+    @property
+    def path(self) -> Path | None:
+        return self._path
+
+    def append(self, record: dict[str, Any]) -> None:
+        if self._failed or self._path is None:
+            return
+        line = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
+        with self._lock:
+            try:
+                if self._handle is None:
+                    self._path.parent.mkdir(parents=True, exist_ok=True)
+                    self._handle = self._path.open("a", encoding="utf-8", buffering=1)
+                self._handle.write(line + "\n")
+            except OSError:
+                self._failed = True
+                LOGGER.exception("Round ledger disabled after a write failure")
+
+    def close(self) -> None:
+        with self._lock:
+            handle, self._handle = self._handle, None
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    LOGGER.debug("Round ledger close failed", exc_info=True)
+
+
 class OperatorStatus:
     """Thread-safe structured status state consumed by the no-focus overlay."""
 
@@ -44,10 +87,12 @@ class OperatorStatus:
         *,
         dry_run: bool,
         avoid_region: tuple[int, int, int, int] | None = None,
+        ledger_path: Path | None = None,
     ) -> None:
         self._config = config
         self._path = path
         self._avoid_region = avoid_region
+        self._ledger = RoundLedger(ledger_path)
         self._lock = threading.RLock()
         self._emitted: set[tuple[str, str]] = set()
         self._sequence = 0
@@ -186,10 +231,28 @@ class OperatorStatus:
         if not self.enabled:
             return
         with self._lock:
+            dedupe_key = (event_id, phase) if event_id else None
+            deduplicated = dedupe_key is not None and dedupe_key in self._emitted
+            self._ledger.append(
+                {
+                    "ts": datetime.now(UTC).isoformat(),
+                    "monotonic": time.monotonic(),
+                    "run_id": self._run_id,
+                    "phase": phase,
+                    "title": title,
+                    "detail": detail,
+                    "question": question,
+                    "clue": clue,
+                    "answer": answer,
+                    "source": source,
+                    "readiness": readiness,
+                    "event_id": event_id,
+                    "deduplicated": deduplicated,
+                }
+            )
             if self._state.get("phase") == "ERROR" and phase != "ERROR":
                 return
-            dedupe_key = (event_id, phase) if event_id else None
-            if dedupe_key is not None and dedupe_key in self._emitted:
+            if deduplicated:
                 return
             if dedupe_key is not None:
                 self._emitted.add(dedupe_key)
@@ -237,6 +300,7 @@ class OperatorStatus:
         thread = self._writer_thread
         if thread is not None:
             thread.join(timeout=2.0)
+        self._ledger.close()
 
     def heartbeat(self) -> None:
         if not self.enabled:

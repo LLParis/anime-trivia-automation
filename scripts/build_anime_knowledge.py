@@ -8,15 +8,14 @@ import sqlite3
 import sys
 import tempfile
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
-
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from anime_trivia_automation.knowledge import normalize_text, strip_html  # noqa: E402
-
+from anime_trivia_automation.knowledge import normalize_text, strip_html
 
 SCHEMA = """
 PRAGMA foreign_keys=ON;

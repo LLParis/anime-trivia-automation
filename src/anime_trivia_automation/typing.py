@@ -3,10 +3,10 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
-import queue
 import random
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -17,7 +17,7 @@ from .config import ReadinessConfig, TypingConfig
 from .discord import DiscordComposer, DiscordComposerLocator
 from .models import AnswerTask
 from .status import NullStatus, OperatorStatus
-from .utils import sanitize_answer
+from .utils import normalize_question, sanitize_answer
 
 LOGGER = logging.getLogger(__name__)
 
@@ -178,6 +178,87 @@ class ForegroundWindowGuard:
 
     def allowed(self) -> tuple[bool, str]:
         return self.validate(self.current())
+
+    @staticmethod
+    def idle_milliseconds() -> int:
+        """Milliseconds since the operator's last keyboard or mouse input."""
+
+        if os.name != "nt":
+            return 0
+
+        class LastInputInfo(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        info = LastInputInfo()
+        info.cbSize = ctypes.sizeof(LastInputInfo)
+        if not user32.GetLastInputInfo(ctypes.byref(info)):
+            return 0
+        kernel32.GetTickCount.restype = wintypes.DWORD
+        return int((kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF)
+
+    def activate(self, hwnd: int) -> bool:
+        """Bring one window to the foreground; True when Windows honoured it.
+
+        A background process may only call SetForegroundWindow after it has
+        generated input; the documented workaround is one ALT tap through
+        keybd_event. AttachThreadInput to the current foreground thread is the
+        second fallback.
+        """
+
+        if not hwnd or os.name != "nt":
+            return False
+        user32, kernel32 = self._windows_api()
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.IsIconic.argtypes = [wintypes.HWND]
+        user32.IsIconic.restype = wintypes.BOOL
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype = wintypes.BOOL
+        user32.keybd_event.argtypes = [
+            wintypes.BYTE,
+            wintypes.BYTE,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+        ]
+        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+        user32.AttachThreadInput.restype = wintypes.BOOL
+
+        if int(user32.GetForegroundWindow() or 0) == int(hwnd):
+            return True
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        vk_menu = 0x12
+        user32.keybd_event(vk_menu, 0, 0, None)
+        user32.keybd_event(vk_menu, 0, 0x0002, None)  # KEYEVENTF_KEYUP
+        user32.SetForegroundWindow(hwnd)
+        deadline = time.monotonic() + 0.25
+        while time.monotonic() < deadline:
+            if int(user32.GetForegroundWindow() or 0) == int(hwnd):
+                return True
+            time.sleep(0.01)
+
+        previous = int(user32.GetForegroundWindow() or 0)
+        if previous:
+            foreground_thread = user32.GetWindowThreadProcessId(previous, None)
+            current_thread = kernel32.GetCurrentThreadId()
+            if foreground_thread and user32.AttachThreadInput(
+                current_thread, foreground_thread, True
+            ):
+                try:
+                    user32.SetForegroundWindow(hwnd)
+                finally:
+                    user32.AttachThreadInput(current_thread, foreground_thread, False)
+        deadline = time.monotonic() + 0.25
+        while time.monotonic() < deadline:
+            if int(user32.GetForegroundWindow() or 0) == int(hwnd):
+                return True
+            time.sleep(0.01)
+        return False
 
 
 class ActivePromptState:
@@ -417,6 +498,9 @@ class SafeKeyboardExecutor:
         self._orphaned_draft: str | None = None
         self._suppression_lock = threading.Lock()
         self._suppressed_rounds: set[str] = set()
+        # Foreground window we displaced to reach Discord for the current
+        # task; restored after Enter so manual research can continue.
+        self._activated_from: int | None = None
 
     @staticmethod
     def _suppression_key(task: AnswerTask) -> str:
@@ -676,6 +760,12 @@ class SafeKeyboardExecutor:
             window = self._guard.current()
             allowed, reason = self._guard.validate(window)
             detail = "Continue manual research; return to the empty Discord composer"
+            if (not allowed or window is None) and self._config.auto_activate_discord:
+                activation = self._try_activate_discord(window)
+                if activation == "activated":
+                    continue
+                if activation:
+                    detail = activation
             if allowed and window is not None:
                 try:
                     if self._orphaned_draft:
@@ -753,7 +843,140 @@ class SafeKeyboardExecutor:
                 return None, None, False
         return None, None, False
 
+    def _try_activate_discord(self, foreground: ForegroundWindow | None) -> str:
+        """Bring the one Discord window forward once the operator is idle.
+
+        Returns ``activated`` on success, otherwise a short operator-facing
+        reason the wait is still passive.
+        """
+
+        idle_ms = self._guard.idle_milliseconds()
+        if idle_ms < self._config.activation_idle_ms:
+            return "Answer ready; waiting for you to pause typing before opening Discord"
+        target = self._guard.expected_window()
+        if target is None:
+            return "Answer ready; Discord window not uniquely found for activation"
+        if not self._guard.activate(target.hwnd):
+            LOGGER.warning("Windows refused to bring Discord to the foreground")
+            return "Answer ready; Windows refused to raise Discord, return manually"
+        if foreground is not None and foreground.hwnd != target.hwnd:
+            self._activated_from = foreground.hwnd
+        LOGGER.info(
+            "Raised Discord to the foreground after %d ms of operator idle time",
+            idle_ms,
+        )
+        return "activated"
+
+    def _restore_foreground(self) -> None:
+        previous, self._activated_from = self._activated_from, None
+        if previous is None or not self._config.restore_previous_foreground:
+            return
+        try:
+            if self._guard.activate(previous):
+                LOGGER.info("Returned focus to the previous window after Enter")
+        except Exception:
+            LOGGER.debug("Could not restore the previous foreground window", exc_info=True)
+
+    def _type_complete_answer(
+        self,
+        task: AnswerTask,
+        answer: str,
+        window: ForegroundWindow,
+        composer: DiscordComposer | None,
+    ) -> str:
+        """Type the complete answer with real keystrokes while the card is green.
+
+        Returns ``committed``, ``manual``, ``retry``, ``ambiguous``, or ``stale``.
+        Every character is verified against the composer so a human edit or a
+        round change cancels the draft without erasing anyone else's text.
+        """
+
+        def prompt_live() -> bool:
+            if self._readiness_config.require_green_outline:
+                return self._active_prompt.is_ready(
+                    task.prompt_signature, task.clue_fingerprint
+                )
+            return self._active_prompt.is_open(
+                task.prompt_signature, task.clue_fingerprint
+            )
+
+        if not prompt_live():
+            return "stale"
+        current_window = self._guard.current()
+        allowed, reason = self._guard.validate(current_window)
+        if not allowed or current_window is None or current_window.hwnd != window.hwnd:
+            LOGGER.info("Keystroke commit deferred: %s", reason)
+            return "retry"
+        if composer is None:
+            LOGGER.warning("Keystroke commit requires a verified Discord composer")
+            return "ambiguous"
+        try:
+            if composer.value() != "":
+                return "manual"
+            if not composer.focused():
+                return "retry"
+        except Exception:
+            LOGGER.debug("Discord composer rerendered before typing", exc_info=True)
+            return "retry"
+
+        typed = 0
+        delays = [random.uniform(*self._config.key_delay_seconds) for _ in answer]
+        for character, delay in zip(answer, delays, strict=True):
+            if self._stop_event.is_set() or not prompt_live():
+                self._clear_or_remember(composer, answer[:typed])
+                return "stale"
+            try:
+                if not composer.focused() or composer.value() != answer[:typed]:
+                    LOGGER.warning("Composer diverged from the owned prefix while typing")
+                    self._clear_or_remember(composer, answer[:typed])
+                    return "manual"
+            except Exception:
+                LOGGER.warning("Composer verification failed while typing", exc_info=True)
+                self._remember_orphan(answer[:typed])
+                return "ambiguous"
+            try:
+                self._controller.type(character)
+            except Exception:
+                LOGGER.warning("Character injection outcome is ambiguous", exc_info=True)
+                self._remember_orphan(answer[: typed + 1])
+                return "ambiguous"
+            typed += 1
+            if delay > 0:
+                time.sleep(delay)
+        try:
+            final_value = composer.value()
+        except Exception:
+            LOGGER.warning("Could not verify the completed keystroke draft", exc_info=True)
+            self._remember_orphan(answer)
+            return "ambiguous"
+        if final_value == answer:
+            return "committed"
+        if final_value.startswith(answer):
+            # Discord appended something (autocomplete/emoji) after the last
+            # key; treat it as a manual divergence rather than sending it.
+            LOGGER.warning("Composer contains more than the owned answer; not sending")
+            return "manual"
+        self._clear_or_remember(composer, final_value if answer.startswith(final_value) else "")
+        return "retry" if final_value == "" else "manual"
+
     def _commit_complete_answer(
+        self,
+        task: AnswerTask,
+        answer: str,
+        window: ForegroundWindow,
+        composer: DiscordComposer | None,
+    ) -> str:
+        """Place the complete answer in the composer while the exact prompt is green.
+
+        Dispatches to real keystrokes (``typing.composer_write_mode = "type"``)
+        or the UI Automation ValuePattern write (``"uia"``).
+        """
+
+        if self._config.composer_write_mode == "type":
+            return self._type_complete_answer(task, answer, window, composer)
+        return self._set_complete_answer(task, answer, window, composer)
+
+    def _set_complete_answer(
         self,
         task: AnswerTask,
         answer: str,
@@ -917,7 +1140,9 @@ class SafeKeyboardExecutor:
             pre_delay = random.uniform(*self._config.pre_delay_seconds)
             start_at = time.monotonic() + pre_delay
             LOGGER.info(
-                "Atomic answer commit scheduled: answer=%r pre-delay=%.3fs",
+                "Answer commit scheduled (%s, guess %d): answer=%r pre-delay=%.3fs",
+                self._config.composer_write_mode,
+                task.guess_index,
                 answer,
                 pre_delay,
             )
@@ -964,15 +1189,15 @@ class SafeKeyboardExecutor:
         self._status.emit(
             "DRAFTING",
             title=f"Complete answer staged — {task.question_label or 'Question'}",
-            detail="Committed atomically after green; verifying before Enter",
+            detail="Composer holds the complete answer after green; sending Enter",
             question=task.question_label or "Question",
             answer=answer,
             source=task.source,
             readiness="ready",
-            event_id=event_token,
+            event_id=f"{event_token}:guess{task.guess_index}",
             increment="drafts_started",
         )
-        LOGGER.info("Complete answer committed atomically after green")
+        LOGGER.info("Complete answer staged after green (guess %d)", task.guess_index)
         if self._stop_event.wait(self._config.enter_after_open_slack_seconds):
             self._clear_or_remember(composer, answer)
             return False
@@ -1032,14 +1257,19 @@ class SafeKeyboardExecutor:
         self._status.emit(
             "SUBMITTED",
             title=f"Enter sent — {task.question_label or 'Question'}",
-            detail="Submission outcome consumed; duplicates are suppressed",
+            detail=(
+                "Submission outcome consumed; duplicates are suppressed"
+                if task.guess_index == 1
+                else f"Follow-up guess {task.guess_index} sent while the card stayed green"
+            ),
             question=task.question_label or "Question",
             answer=answer,
             source=task.source,
             readiness="ready",
-            event_id=event_token,
+            event_id=f"{event_token}:guess{task.guess_index}",
             increment="submitted",
         )
+        self._restore_foreground()
 
         if composer is not None:
             try:
@@ -1097,30 +1327,45 @@ class SafeKeyboardExecutor:
 
 
 class AnswerDispatcher:
-    """Serializes typing and suppresses duplicate answers for one active prompt."""
+    """Serializes composer access and runs the per-round guess ladder.
+
+    Wrong guesses cost nothing in Anime Soul, so one round may receive several
+    distinct answers: the first as soon as it is known, each later one only
+    after ``guess_gap_seconds`` and only while the same card is still open.
+    """
 
     def __init__(
         self,
         executor: SafeKeyboardExecutor,
         active_prompt: ActivePromptState,
         stop_event: threading.Event,
+        *,
+        max_guesses_per_round: int = 3,
+        guess_gap_seconds: float = 1.5,
     ) -> None:
         self._executor = executor
         self._active_prompt = active_prompt
         self._stop_event = stop_event
-        # One worker may be waiting on Chrome/Gemini. Keep only the newest
-        # queued observation behind it so OCR corrections cannot fill a FIFO
-        # with stale fingerprints or crowd out the current clue.
-        self._queue: queue.Queue[AnswerTask] = queue.Queue(maxsize=1)
-        self._lock = threading.Lock()
-        self._pending: set[tuple[str, str]] = set()
-        self._last_answered: str | None = None
+        self._max_guesses = max(1, int(max_guesses_per_round))
+        self._guess_gap = max(0.0, float(guess_gap_seconds))
+        self._condition = threading.Condition()
+        self._queue: deque[AnswerTask] = deque()
+        # Distinct normalized answers already sent per prompt signature, and
+        # when the last one was sent. Cleared as soon as a different live
+        # prompt is observed so the next quiz can reuse round signatures.
+        self._answered: dict[str, set[str]] = {}
+        self._last_sent_at: dict[str, float] = {}
+        self._in_flight: AnswerTask | None = None
         self._thread = threading.Thread(
             target=self._run, name="answer-dispatcher", daemon=True
         )
 
     def start(self) -> None:
         self._thread.start()
+
+    @staticmethod
+    def _answer_key(task: AnswerTask) -> str:
+        return normalize_question(task.answer)
 
     def observe_prompt(
         self,
@@ -1134,16 +1379,23 @@ class AnswerDispatcher:
         ):
             return False
         self._executor.observe_prompt(signature, clue_fingerprint)
-        with self._lock:
-            # A single transient OCR miss (None) must cancel pending typing but
-            # must not re-arm an already answered clue. Rearm only after a
-            # different real prompt has been observed.
-            if (
-                self._last_answered is not None
-                and signature is not None
-                and signature != self._last_answered
-            ):
-                self._last_answered = None
+        with self._condition:
+            if signature is not None:
+                # A single transient OCR miss (None) must not re-arm an answered
+                # round; only a different real prompt retires the old record.
+                for stale in [key for key in self._answered if key != signature]:
+                    self._answered.pop(stale, None)
+                    self._last_sent_at.pop(stale, None)
+                if clue_fingerprint is not None:
+                    # Queued OCR variants of the same round with an older
+                    # fingerprint can never pass the executor's identity check.
+                    self._queue = deque(
+                        task
+                        for task in self._queue
+                        if task.prompt_signature != signature
+                        or task.clue_fingerprint == clue_fingerprint
+                    )
+            self._condition.notify_all()
         return True
 
     def submit(self, task: AnswerTask) -> bool:
@@ -1154,75 +1406,101 @@ class AnswerDispatcher:
         ):
             LOGGER.debug("Rejected answer task for a non-live prompt")
             return False
-        task_key = (task.prompt_signature, task.clue_fingerprint)
-        with self._lock:
+        answer_key = self._answer_key(task)
+        if not answer_key:
+            return False
+        with self._condition:
+            sent = self._answered.get(task.prompt_signature, set())
+            if answer_key in sent:
+                return False
+            queued_keys = {
+                self._answer_key(item)
+                for item in self._queue
+                if item.prompt_signature == task.prompt_signature
+            }
+            in_flight = self._in_flight
             if (
-                task_key in self._pending
-                or task.prompt_signature == self._last_answered
+                in_flight is not None
+                and in_flight.prompt_signature == task.prompt_signature
             ):
+                queued_keys.add(self._answer_key(in_flight))
+            if answer_key in queued_keys:
                 return False
-            self._pending.add(task_key)
-        try:
-            self._queue.put_nowait(task)
-            return True
-        except queue.Full:
-            try:
-                stale = self._queue.get_nowait()
-            except queue.Empty:
-                stale = None
-            with self._lock:
-                if stale is not None:
-                    self._pending.discard(
-                        (stale.prompt_signature, stale.clue_fingerprint)
-                    )
-            try:
-                self._queue.put_nowait(task)
-            except queue.Full:
-                with self._lock:
-                    self._pending.discard(task_key)
-                LOGGER.warning("Latest answer slot raced; candidate will retry")
+            if len(sent) + len(queued_keys) >= self._max_guesses:
+                LOGGER.info(
+                    "Guess ladder full for %s; not queueing %r",
+                    task.question_label or task.prompt_signature,
+                    task.answer,
+                )
                 return False
-            LOGGER.debug("Replaced one stale queued answer with the latest clue")
-            return True
+            self._queue.append(task)
+            self._condition.notify_all()
+        return True
 
-    def _run(self) -> None:
+    def _wait_for_guess_gap(self, task: AnswerTask) -> bool:
+        """Space follow-up guesses; abandon them when the round stops being open."""
+
+        with self._condition:
+            last_sent = self._last_sent_at.get(task.prompt_signature)
+        if last_sent is None:
+            return True
+        deadline = last_sent + self._guess_gap
         while not self._stop_event.is_set():
-            try:
-                task = self._queue.get(timeout=0.2)
-            except queue.Empty:
-                try:
-                    self._executor.service_orphan()
-                except Exception:
-                    LOGGER.debug("Orphan-draft service failed", exc_info=True)
-                continue
-            succeeded = False
-            with self._lock:
-                already_answered = task.prompt_signature == self._last_answered
-            if already_answered or self._executor.is_suppressed(task):
-                with self._lock:
-                    self._pending.discard(
-                        (task.prompt_signature, task.clue_fingerprint)
-                    )
-                continue
             if not self._active_prompt.is_open(
                 task.prompt_signature, task.clue_fingerprint
             ):
-                with self._lock:
-                    self._pending.discard(
-                        (task.prompt_signature, task.clue_fingerprint)
-                    )
-                continue
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            if self._stop_event.wait(min(remaining, 0.02)):
+                return False
+        return False
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            with self._condition:
+                while not self._queue and not self._stop_event.is_set():
+                    self._condition.wait(0.2)
+                    if not self._queue:
+                        try:
+                            self._executor.service_orphan()
+                        except Exception:
+                            LOGGER.debug("Orphan-draft service failed", exc_info=True)
+                if self._stop_event.is_set():
+                    return
+                task = self._queue.popleft()
+                already_sent = self._answer_key(task) in self._answered.get(
+                    task.prompt_signature, set()
+                )
+                self._in_flight = task
             try:
-                succeeded = self._executor.execute(task)
-            except Exception:
-                LOGGER.exception("Keyboard execution failed")
-            finally:
-                with self._lock:
-                    self._pending.discard(
-                        (task.prompt_signature, task.clue_fingerprint)
+                if already_sent or self._executor.is_suppressed(task):
+                    continue
+                if not self._active_prompt.is_open(
+                    task.prompt_signature, task.clue_fingerprint
+                ):
+                    continue
+                if not self._wait_for_guess_gap(task):
+                    LOGGER.info(
+                        "Dropped follow-up guess %r because the round is no longer open",
+                        task.answer,
                     )
-                    if succeeded:
-                        self._last_answered = task.prompt_signature
+                    continue
+                succeeded = False
+                try:
+                    succeeded = self._executor.execute(task)
+                except Exception:
+                    LOGGER.exception("Keyboard execution failed")
+                if succeeded:
+                    with self._condition:
+                        self._answered.setdefault(task.prompt_signature, set()).add(
+                            self._answer_key(task)
+                        )
+                        self._last_sent_at[task.prompt_signature] = time.monotonic()
+            finally:
+                with self._condition:
+                    self._in_flight = None
 
     def join(self, timeout: float = 5.0) -> None:
         self._thread.join(timeout=timeout)

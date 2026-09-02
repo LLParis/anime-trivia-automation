@@ -24,6 +24,8 @@
     "why do fireflies have to die so soon": "Grave of the Fireflies"
   },
   "image_hashes": {
+    "9d1d4bba62a2b44c26ccf3296cff4ad4993305b6e7233ceb46d699312c0ca66c": "Spirited Away",
+    "9d8158ca423e2f31786fa7b5b5c064c28f5c5a4b49ad91e459b5b5b5bd520533": "Delicious in Dungeon",
     "9d353c6662d847b97e63dbcf6e30914085df3c3ec1cd643b930466d11f0e9324": "Space Brothers",
     "c61c13ff3bc3fcc0c0fce71b3c0019fe38c30073e31cc71c8fe138c33ff0807d": "Akira",
     "ce84383733fbcfc00e07c0fe38c3e3383bc08e0fe8ef3801e23c3bc1c71f38c7": "Space Brothers",
@@ -35,6 +37,8 @@
     "ee6f1c303191e3cf8c3cfc7f03e13380f38c1c38cc7fcfef3c77238039180087": "Neon Genesis Evangelion",
     "f0f003f00f0ffc1fe1f0e3e0f00f060ffe1f041fc1c0f0ffe7f80e0e0e1f1f00": "Neon Genesis Evangelion",
     "f0ff0f800f00f87ff1f8e0001f1f0780f03fffffe00000ff0fc0f81ffc7fc000": "Delicious in Dungeon",
+    "f3e06b570c9d94a82d0a9276b3196d95d2e44beadee62541817a97a26c959ad6": "Ranking of Kings",
+    "f9b3064c0641f933991e9ff1204f2461f338c30edff330ede71f00040231fffe": "Keep Your Hands Off Eizouken",
     "f1ff01000e00ff3fe1e0e0ffff0f0600fe7fc3c0c07fffff0200fc1f0f800038": "Castle in the Sky",
     "d1cb83cc3ab47c33253b25386c3c06c7c1cfd1e89bc39887d9fd1bc01203e47f": "Akira"
   },
@@ -126,6 +130,16 @@
       }
     },
     "image_hashes": {
+      "9d1d4bba62a2b44c26ccf3296cff4ad4993305b6e7233ceb46d699312c0ca66c": {
+        "created_utc": "2026-09-02T14:05:00Z",
+        "hash_size": 16,
+        "source": "user-live-screenshot-cross-checked"
+      },
+      "9d8158ca423e2f31786fa7b5b5c064c28f5c5a4b49ad91e459b5b5b5bd520533": {
+        "created_utc": "2026-09-02T14:05:00Z",
+        "hash_size": 16,
+        "source": "bot-reveal-transcript-2026-09-02-07"
+      },
       "9d353c6662d847b97e63dbcf6e30914085df3c3ec1cd643b930466d11f0e9324": {
         "created_utc": "2026-09-01T02:40:00Z",
         "hash_size": 16,
@@ -180,6 +194,16 @@
         "created_utc": "2026-08-31T21:32:00Z",
         "hash_size": 16,
         "source": "user-supplied-example-1200"
+      },
+      "f3e06b570c9d94a82d0a9276b3196d95d2e44beadee62541817a97a26c959ad6": {
+        "created_utc": "2026-09-02T14:05:00Z",
+        "hash_size": 16,
+        "source": "user-live-screenshot-plus-reviewed-alternate"
+      },
+      "f9b3064c0641f933991e9ff1204f2461f338c30edff330ede71f00040231fffe": {
+        "created_utc": "2026-09-02T14:05:00Z",
+        "hash_size": 16,
+        "source": "user-corrected-manual-plus-reviewed-alternate"
       },
       "f1ff01000e00ff3fe1e0e0ffff0f0600fe7fc3c0c07fffff0200fc1f0f800038": {
         "created_utc": "2026-08-31T21:32:00Z",

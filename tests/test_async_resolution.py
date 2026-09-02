@@ -40,6 +40,7 @@ def make_async_app(signature: str, fingerprint: str, round_token: str):
     app._dispatcher = RecordingDispatcher()
     app._config = SimpleNamespace(
         antigravity=SimpleNamespace(enabled=False),
+        typing=SimpleNamespace(max_guesses_per_round=3, max_answer_characters=96),
     )
     app._antigravity = SimpleNamespace(
         availability=SimpleNamespace(available=False),
@@ -62,6 +63,7 @@ def make_async_app(signature: str, fingerprint: str, round_token: str):
         clue='"Who decides limits? And based on what?"',
         observation=observation,
         started_at=time.perf_counter(),
+        semantic_clue=True,
     )
     state = AsyncResolutionRound(
         request=request,
@@ -223,7 +225,7 @@ class AsyncResolutionTests(unittest.TestCase):
         self.assertTrue(app._queue_resolution_candidate(state))
         self.assertEqual(app._dispatcher.tasks[0].answer, "One-Punch Man")
 
-    def test_provider_disagreement_never_queues_first_answer(self) -> None:
+    def test_first_answer_queues_immediately_and_disagreement_ladders(self) -> None:
         signature = "round:anime_title:1/10"
         fingerprint = "text:ambiguous clue"
         round_token = "session-1:round-1:1/10"
@@ -231,32 +233,43 @@ class AsyncResolutionTests(unittest.TestCase):
         state.providers = {"gemini", "qwen"}
         state.pending = {"gemini", "qwen"}
 
+        # Gemini answers first: it is queued right away, without waiting for
+        # the slower local provider (a wrong guess is free, a late one loses).
         app._accept_resolution_result(
             ProviderResolution(
                 key=state.request.key,
                 provider="gemini",
                 source="gemini-3.7-structured",
-                answer="Wrong Answer",
-                confidence=0.99,
+                answer="First Answer",
+                confidence=0.80,
                 elapsed_ms=1500.0,
+                alternatives=("Alt One",),
             )
         )
-        self.assertIsNone(state.candidate)
-        self.assertEqual(app._dispatcher.tasks, [])
+        self.assertEqual(state.candidate.answer, "First Answer")
+        self.assertEqual(
+            [(task.answer, task.guess_index) for task in app._dispatcher.tasks],
+            [("First Answer", 1), ("Alt One", 2)],
+        )
 
+        # A disagreeing provider becomes the next rung of the ladder.
         app._accept_resolution_result(
             ProviderResolution(
                 key=state.request.key,
                 provider="qwen",
                 source="qwen38-retrieval-consensus",
-                answer="Correct Answer",
+                answer="Other Answer",
                 confidence=0.99,
                 elapsed_ms=3800.0,
+                alternatives=("First Answer",),
             )
         )
-        self.assertTrue(state.conflicted)
-        self.assertIsNone(state.candidate)
-        self.assertEqual(app._dispatcher.tasks, [])
+        self.assertEqual(
+            [(task.answer, task.guess_index) for task in app._dispatcher.tasks],
+            [("First Answer", 1), ("Alt One", 2), ("Other Answer", 3)],
+        )
+        self.assertEqual(state.pending, set())
+        self.assertFalse(state.unknown_emitted)
 
     def test_antigravity_fallback_answers_after_primary_abstention(self) -> None:
         signature = "round:character:7/10"
@@ -387,7 +400,7 @@ class AsyncResolutionTests(unittest.TestCase):
         self.assertEqual(result.error, "stale")
         self.assertEqual(calls, [])
 
-    def test_antigravity_never_double_votes_a_primary_disagreement(self) -> None:
+    def test_antigravity_fallback_is_not_spent_when_primaries_answered(self) -> None:
         signature = "round:anime_title:1/10"
         fingerprint = "text:ambiguous"
         round_token = "session-1:round-1:1/10"
@@ -424,9 +437,35 @@ class AsyncResolutionTests(unittest.TestCase):
         )
         self.assertEqual(submitted, [])
         self.assertFalse(state.fallback_started)
-        self.assertTrue(state.conflicted)
-        self.assertIsNone(state.candidate)
-        self.assertEqual(app._dispatcher.tasks, [])
+        self.assertEqual(state.candidate.answer, "One-Punch Man")
+        self.assertEqual(
+            [task.answer for task in app._dispatcher.tasks],
+            ["One-Punch Man", "Dragon Ball Z"],
+        )
+
+    def test_duplicate_answers_across_providers_are_queued_once(self) -> None:
+        signature = "round:character:5/10"
+        fingerprint = "text:same"
+        round_token = "session-1:round-5:5/10"
+        app, state = make_async_app(signature, fingerprint, round_token)
+        state.providers = {"gemini", "qwen"}
+        state.pending = {"gemini", "qwen"}
+        for provider, source in (
+            ("gemini", "gemini-3.7-structured"),
+            ("qwen", "qwen38-retrieval-consensus"),
+        ):
+            app._accept_resolution_result(
+                ProviderResolution(
+                    key=state.request.key,
+                    provider=provider,
+                    source=source,
+                    answer="Elias Ainsworth",
+                    confidence=0.9,
+                    elapsed_ms=1000.0,
+                )
+            )
+        self.assertEqual([task.answer for task in app._dispatcher.tasks], ["Elias Ainsworth"])
+        self.assertEqual(len(state.guesses), 1)
 
 
 if __name__ == "__main__":

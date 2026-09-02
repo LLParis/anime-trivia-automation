@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source": "Anime Soul bot reveals plus explicitly labeled accepted-live-result correlations supplied by the user's client",
-  "captured_utc": "2026-09-02T01:05:00Z",
+  "captured_utc": "2026-09-02T14:05:00Z",
   "answers": [
     "86 Eighty-Six",
     "A Place Further Than the Universe",
@@ -20,6 +20,7 @@
     "Attack on Titan",
     "Barakamon",
     "Beastars",
+    "Beatrice",
     "Becky Blackbell",
     "Benimaru",
     "Black Butler",
@@ -54,6 +55,7 @@
     "Dr. Stone",
     "Dragon Ball",
     "Dragon Ball Z",
+    "Elias Ainsworth",
     "Emma Grace Field",
     "Epsilon",
     "Erased",
@@ -72,6 +74,7 @@
     "Gachiakuta",
     "Gen Asagiri",
     "Gesicht",
+    "Ghost in the Shell",
     "Ghost in the Shell Stand Alone Complex",
     "Gintama",
     "Gintoki Sakata",
@@ -88,6 +91,7 @@
     "Hellsing Ultimate",
     "Himmel",
     "Hina Amano",
+    "Hinata Kawamoto",
     "Hitori Gotoh",
     "Howl's Moving Castle",
     "Hunter x Hunter",
@@ -228,6 +232,7 @@
     "Yuki Sohma",
     "Yuki Itose",
     "Yuno Grinberryall",
+    "Yunyun",
     "Yuzuru Nishimiya",
     "Zom 100 Bucket List of the Dead"
   ]

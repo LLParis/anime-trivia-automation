@@ -4,6 +4,7 @@ import hashlib
 import logging
 import queue
 import re
+import time
 import unicodedata
 from pathlib import Path
 from typing import Generic, TypeVar
@@ -24,6 +25,26 @@ def normalize_accessible_clue(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).casefold()
     text = text.replace("\ufe0f", "")
     return " ".join(text.split()).strip()
+
+
+def describe_emoji(clue: str) -> str:
+    """Spell out emoji as lower-case Unicode names so a rebus reads as words.
+
+    ``"🏍️❄️🏚️🥫"`` becomes ``"motorcycle, snowflake, derelict house, canned
+    food"``; text-only models resolve that far more reliably than raw glyphs.
+    """
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for character in unicodedata.normalize("NFKC", clue).replace("️", ""):
+        category = unicodedata.category(character)
+        if character == "‍" or not (category.startswith("S") or ord(character) > 0xFFFF):
+            continue
+        name = unicodedata.name(character, "").replace("_", " ").lower()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return ", ".join(names)
 
 
 def short_signature(namespace: str, value: str) -> str:
@@ -76,13 +97,31 @@ class LatestMailbox(Generic[T]):
         return self._queue.get(timeout=timeout)
 
 
-def configure_logging(level: str) -> None:
+def configure_logging(level: str, log_dir: Path | None = None) -> Path | None:
+    """Log to the console and, when ``log_dir`` is set, to one file per launch.
+
+    The console launcher closes with the quiz, so a persistent per-launch file
+    is the only record of what every round decided. Returns the file path.
+    """
+
     numeric_level = getattr(logging, level.upper(), logging.INFO)
-    logging.basicConfig(
-        level=numeric_level,
-        format="%(asctime)s.%(msecs)03d %(levelname)-8s %(name)s | %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    log_format = "%(asctime)s.%(msecs)03d %(levelname)-8s %(name)s | %(message)s"
+    logging.basicConfig(level=numeric_level, format=log_format, datefmt="%H:%M:%S")
+    if log_dir is None:
+        return None
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        log_path = log_dir / f"anime-trivia-{stamp}.log"
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler.setLevel(numeric_level)
+        handler.setFormatter(logging.Formatter(log_format, "%H:%M:%S"))
+        logging.getLogger().addHandler(handler)
+        logging.getLogger(__name__).info("Session log file: %s", log_path)
+        return log_path
+    except OSError:
+        logging.getLogger(__name__).exception("Could not open the session log file")
+        return None
 
 
 def ensure_directory(path: Path) -> None:

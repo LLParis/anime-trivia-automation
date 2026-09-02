@@ -98,13 +98,12 @@ class OperatorStatusTests(unittest.TestCase):
             status = OperatorStatus(StatusConfig(), path, dry_run=False)
             with self.assertLogs(
                 "anime_trivia_automation.status", level="ERROR"
+            ), mock.patch(
+                "anime_trivia_automation.status.os.replace",
+                side_effect=PermissionError("persistent status lock"),
             ):
-                with mock.patch(
-                    "anime_trivia_automation.status.os.replace",
-                    side_effect=PermissionError("persistent status lock"),
-                ):
-                    status.emit("ARMED", title="Armed")
-                    status.flush()
+                status.emit("ARMED", title="Armed")
+                status.flush()
             self.assertFalse(status.enabled)
             status.heartbeat()
             status.close()

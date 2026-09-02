@@ -1,6 +1,11 @@
 {
   "capture": {
-    "region": [0, 0, 900, 400],
+    "region": [
+      0,
+      0,
+      900,
+      400
+    ],
     "calibrated": false,
     "device_idx": 0,
     "output_idx": null,
@@ -13,7 +18,10 @@
   "change_detection": {
     "device": "cuda:0",
     "require_cuda": true,
-    "thumbnail_size": [96, 96],
+    "thumbnail_size": [
+      96,
+      96
+    ],
     "mean_absolute_threshold": 0.012,
     "changed_pixel_threshold": 0.055,
     "changed_pixel_ratio": 0.012,
@@ -34,8 +42,13 @@
     "max_header_to_answer_pixels": 300,
     "max_answer_to_footer_pixels": 120,
     "horizontal_alignment_tolerance": 96,
-    "header_markers": ["anime guessing game"],
-    "answer_markers": ["answer with", "first correct guess"]
+    "header_markers": [
+      "anime guessing game"
+    ],
+    "answer_markers": [
+      "answer with",
+      "first correct guess"
+    ]
   },
   "readiness": {
     "require_green_outline": true,
@@ -57,9 +70,17 @@
     "channel_dominance_ratio": 1.25,
     "state_dominance_ratio": 1.5,
     "allow_text_only_ready": false,
-    "ready_text_markers": ["answer now", "answers open you have"],
-    "locked_text_markers": ["get ready", "reading time"],
-    "closed_text_markers": ["round over"]
+    "ready_text_markers": [
+      "answer now",
+      "answers open you have"
+    ],
+    "locked_text_markers": [
+      "get ready",
+      "reading time"
+    ],
+    "closed_text_markers": [
+      "round over"
+    ]
   },
   "ocr": {
     "device": "gpu:0",
@@ -107,13 +128,13 @@
     "cache_type": "q4_0",
     "mtp_draft_tokens": 3,
     "startup_timeout_seconds": 30.0,
-    "total_timeout_seconds": 5.0,
+    "total_timeout_seconds": 8.0,
     "model_timeout_seconds": 4.0,
-    "web_timeout_seconds": 2.0,
+    "web_timeout_seconds": 1.5,
     "max_search_queries": 3,
     "max_search_results": 10,
     "max_evidence_characters": 5000,
-    "min_confidence": 0.72,
+    "min_confidence": 0.45,
     "max_answer_characters": 96,
     "answer_catalog_path": "data/answer_catalog.seed.json",
     "knowledge_index_path": "data/anime_knowledge.sqlite"
@@ -129,10 +150,11 @@
     "preflight_timeout_seconds": 12.0,
     "total_timeout_seconds": 30.0,
     "text_timeout_seconds": 10.0,
-    "min_confidence": 0.9,
+    "min_confidence": 0.35,
     "max_answer_characters": 96,
     "max_clue_characters": 2000,
-    "max_image_bytes": 4000000
+    "max_image_bytes": 4000000,
+    "max_alternatives": 2
   },
   "antigravity": {
     "enabled": false,
@@ -142,17 +164,25 @@
     "working_root": "runtime/antigravity",
     "preflight_timeout_seconds": 8.0,
     "total_timeout_seconds": 6.0,
-    "min_confidence": 0.9,
+    "min_confidence": 0.35,
     "max_answer_characters": 96,
     "max_clue_characters": 2000,
     "max_stdout_bytes": 262144
   },
   "typing": {
     "enabled": true,
-    "expected_process_names": ["Discord.exe"],
+    "expected_process_names": [
+      "Discord.exe"
+    ],
     "expected_window_title_contains": "Anime Soul - Discord",
-    "pre_delay_seconds": [0.4, 1.1],
-    "key_delay_seconds": [0.03, 0.08],
+    "pre_delay_seconds": [
+      0.05,
+      0.15
+    ],
+    "key_delay_seconds": [
+      0.012,
+      0.028
+    ],
     "draft_while_locked": true,
     "verify_composer": true,
     "auto_focus_composer": true,
@@ -163,7 +193,13 @@
     "fallback_answer_open_delay_seconds": 5.0,
     "enter_after_open_slack_seconds": 0.06,
     "max_answer_characters": 96,
-    "stop_key": "f12"
+    "stop_key": "f12",
+    "composer_write_mode": "type",
+    "auto_activate_discord": true,
+    "activation_idle_ms": 350,
+    "restore_previous_foreground": true,
+    "max_guesses_per_round": 3,
+    "guess_gap_seconds": 1.5
   },
   "status": {
     "enabled": true,
@@ -187,6 +223,8 @@
     "debug_dir": "debug",
     "save_prompt_crops": false,
     "scene_retry_limit": 1,
-    "log_level": "INFO"
+    "log_level": "INFO",
+    "ledger_path": "runtime/round_ledger.jsonl",
+    "log_dir": "runtime/logs"
   }
 }
