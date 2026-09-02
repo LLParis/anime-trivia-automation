@@ -50,12 +50,18 @@ def matches(expected: str, produced: str | None) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="config.json")
-    parser.add_argument("--provider", choices=("gemini", "qwen"), default="gemini")
+    parser.add_argument("--provider", choices=("gemini", "qwen"), default="qwen")
     parser.add_argument("--limit", type=int, default=20, help="most recent N pairs")
     parser.add_argument("--offset", type=int, default=0, help="skip the newest N pairs")
     parser.add_argument("--pause", type=float, default=4.0, help="seconds between calls")
     parser.add_argument("--out", default=None, help="JSON report path")
     args = parser.parse_args()
+
+    if args.provider == "gemini" and args.limit != 1:
+        parser.error(
+            "Gemini Developer API evaluations are hard-capped at --limit 1 "
+            "to protect project quota"
+        )
 
     config = load_config(args.config)
     pairs = json.loads(config.runtime.history_path.read_text(encoding="utf-8"))["pairs"]

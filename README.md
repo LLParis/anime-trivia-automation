@@ -86,12 +86,13 @@ Full app with typing disabled:
 .\.venv\Scripts\anime-trivia.exe --config .\config.json --dry-run
 ```
 
-Provider accuracy on the most recent reviewed clues (real model calls, no Discord):
+Local-provider accuracy on reviewed clues (no Discord and no paid/account API calls):
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\eval_resolvers.py --config .\config.json --provider qwen --limit 24
-.\.venv\Scripts\python.exe .\scripts\eval_resolvers.py --config .\config.json --provider gemini --limit 24
 ```
+
+The Gemini Developer API evaluator is disabled by the workstation config and hard-capped to one call when explicitly enabled. Never use batch evaluation against live Developer API or Antigravity account quota.
 
 Replay saved cards through one warmed OCR/cache process:
 
