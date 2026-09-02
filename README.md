@@ -63,6 +63,7 @@ DXcam 60 FPS physical-pixel crop
 - `data/trivia_cache.json` — ignored mutable cache, repaired from the reviewed seed on launch.
 - `scripts/replay_screenshots.py` — one-warmup offline replay of saved cards.
 - `scripts/build_anime_knowledge.py` — streamed, atomic index build from the private local AniList, quote, and Manami source files.
+- `scripts/run_scheduled_production.ps1` — full production entrypoint used by the normal-user Windows scheduled task, with per-run logs under `runtime`.
 - `docs/KNOWLEDGE_SOURCE_AUDIT.md` — detailed schema, size, freshness, license, and inclusion audit for all investigated datasets.
 
 ## Install
@@ -126,6 +127,8 @@ Double-click `Start Anime Trivia.cmd`, or run:
 ```
 
 It is safe to start early. Leave the launcher open and keep Anime Soul visible. The Gemini API and account-authenticated text fallback are integrated, so normal operation no longer needs browser screenshot/paste work. Manual research remains available; if another app is foreground when an answer resolves, the panel retains it until Discord returns. The app refuses Discord search, another channel, a nonempty editor, or an editor modified by a human.
+
+On the installed workstation, Windows Task Scheduler task `Anime Trivia Production` runs this production entrypoint as the normal interactive user at 6:50 AM, 11:50 AM, and 5:50 PM daily. It keeps one worker alive and ignores duplicate scheduled starts.
 
 Manual text always wins: if you have already begun typing in Discord, the app leaves it untouched and does not press Enter. `WAITING GREEN` means the answer exists only in memory and Discord is untouched. `DRAFTING` now means one complete value has been atomically staged after green and Enter is imminent; any divergent user edit blocks Enter without being erased. Press F12 at any time to stop.
 
