@@ -162,7 +162,7 @@
     "model_slug": "gemini-3.8-flash-low",
     "working_root": "runtime/antigravity",
     "preflight_timeout_seconds": 8.0,
-    "total_timeout_seconds": 30.0,
+    "total_timeout_seconds": 40.0,
     "min_confidence": 0.5,
     "max_answer_characters": 96,
     "max_clue_characters": 2000,

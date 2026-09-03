@@ -71,6 +71,11 @@ def main() -> int:
     parser.add_argument("--manifest", default="runtime/card_manifest.json")
     parser.add_argument("--screens", required=True)
     parser.add_argument("--kinds", default="text", help="comma list: text,visual")
+    parser.add_argument(
+        "--cases",
+        default=None,
+        help="JSON list of {clue, answer, type, kind} to rehearse instead of the manifest",
+    )
     parser.add_argument("--red", type=float, default=5.0)
     parser.add_argument("--green-max", type=float, default=12.0)
     parser.add_argument("--blank", type=float, default=2.0)
@@ -95,7 +100,52 @@ def main() -> int:
         c for c in manifest
         if c.get("card") and c.get("readiness") == "locked" and c.get("answer") and c.get("kind") in kinds
     ]
-    cards = order_without_label_repeats(cards)
+    if args.cases:
+        # Rehearse specific clues rather than the saved manifest. This is what
+        # you want after a round fails live: replay that exact clue through the
+        # real pipeline. Any manifest card of the right kind supplies the
+        # painted pixels; the clue itself is injected, so the card art is only
+        # there to drive red/green detection.
+        cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
+        # Draw art from the whole manifest: --kinds filters the manifest run,
+        # but each case declares its own kind.
+        # Rotate through distinct art per kind: two cases painted on the same
+        # card produce the same round signature, and the app answers a round
+        # once, so the second would look like a silent failure.
+        art = {
+            kind: [
+                c
+                for c in manifest
+                if c.get("card")
+                and c.get("readiness") == "locked"
+                and c.get("kind") == kind
+            ]
+            for kind in ("text", "visual")
+        }
+        used: dict[str, int] = {"text": 0, "visual": 0}
+        cards = []
+        for case in cases:
+            kind = case.get("kind") or "text"
+            pool = art.get(kind) or []
+            if not pool:
+                raise SystemExit(f"no {kind} card art in the manifest to paint")
+            source = pool[used[kind] % len(pool)]
+            used[kind] += 1
+            cards.append(
+                {
+                    "file": source["file"],
+                    "kind": kind,
+                    "answer": case["answer"],
+                    "hint": case["clue"],
+                    "type": case.get("type") or "anime_title",
+                    # The label must be the one the app will OCR off the painted
+                    # pixels, or the injected clue is rejected as belonging to a
+                    # different round and the case never reaches the solver.
+                    "question": source.get("question") or "1/10",
+                }
+            )
+    else:
+        cards = order_without_label_repeats(cards)
     if args.limit:
         cards = cards[: args.limit]
     log_path = newest_log(config.runtime.log_dir or Path("runtime/logs"))
@@ -139,9 +189,12 @@ def main() -> int:
         red = ImageTk.PhotoImage(compose((width, height), image, (24, y)))
         green = ImageTk.PhotoImage(compose((width, height), recolor_accent_to_green(image), (24, y)))
         seen_before = len(typed_answers(log_path))
-        clue = card.get("hint") if card.get("kind") == "text" else clue_by_answer.get(
-            (normalize_question(card["answer"]), card.get("type") or "")
-        )
+        if args.cases:
+            clue = card.get("hint")  # explicit case clue, whatever the kind
+        else:
+            clue = card.get("hint") if card.get("kind") == "text" else clue_by_answer.get(
+                (normalize_question(card["answer"]), card.get("type") or "")
+            )
         if clue:
             clue_file.write_text(
                 json.dumps(
