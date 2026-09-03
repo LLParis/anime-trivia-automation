@@ -614,6 +614,35 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertEqual(match.group(1), "🚀 🌙 👨‍🚀 👬")
         self.assertEqual(match.group(3), "2")
 
+    def test_card_parser_handles_the_2026_09_02_discord_row_and_group_names(self) -> None:
+        # Exact strings read from the live #anime-chat window on 2026-09-02.
+        row_name = (
+            "Anime Soul6:03 PMWednesday, September 2, 2026 6:03 PM Anime Guessing Game "
+            "—  Round Over,Answer with the anime title — first correct guess in chat wins!"
+            "Question 10/10 · round over(edited)Wednesday, September 2, 2026 6:04 PM"
+        )
+        group_name = (
+            "Anime Soul App , 🎮 Anime Guessing Game — ⚪ Round Over 👦 📜 👺 🐱 🍶 , "
+            "🎯 Answer with the anime title — first correct guess in chat wins! "
+            "Question 10/10 · round over"
+        )
+        text_row = (
+            "Anime Soul6:03 PMWednesday, September 2, 2026 6:03 PM Anime Guessing Game "
+            '—  Round Over"You believe in aliens, but not ghosts?",Answer with the anime '
+            "title — first correct guess in chat wins!Question 9/10 · round over(edited)"
+        )
+        # The row name has no emoji at all: an emoji card cannot be parsed from it.
+        self.assertIsNone(DiscordQuestionLocator.parse_card_name(row_name))
+        self.assertEqual(
+            DiscordQuestionLocator.parse_card_name(group_name),
+            ("👦 📜 👺 🐱 🍶", "anime_title", "10/10"),
+        )
+        # A text card still parses from the emoji-less row name via the fallback.
+        self.assertEqual(
+            DiscordQuestionLocator.parse_card_name(text_row),
+            ('"You believe in aliens, but not ghosts?"', "anime_title", "9/10"),
+        )
+
     def test_accessibility_reveal_parser_extracts_official_answer(self) -> None:
         accessible_name = (
             "Anime Soul6:04 PMTuesday, September 1, 2026 6:04 PM "

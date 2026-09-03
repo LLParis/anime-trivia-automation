@@ -178,11 +178,15 @@ class DiscordQuestionLocator(DiscordComposerLocator):
             name = str(element.CurrentName or "")
             if "Anime Guessing Game" not in name:
                 continue
-            card = self.parse_card_name(name)
+            # The list row's own name drops every emoji (status dot, target,
+            # and the whole clue of an emoji rebus). The inner message group
+            # keeps them, e.g. "... Round Over 👦 📜 👺 🐱 🍶 , 🎯 Answer with ...".
+            full_name = self._message_group_name(element, automation, uia_types) or name
+            card = self.parse_card_name(full_name)
             if card is None:
                 LOGGER.warning(
                     "Anime Soul card did not parse; accessible name was %r",
-                    name[:400],
+                    full_name[:400],
                 )
                 continue
             clue, expected_type, question_label = card
@@ -206,6 +210,24 @@ class DiscordQuestionLocator(DiscordComposerLocator):
                 )
             )
         return max(parsed, key=lambda item: (item[0], item[1]))[2] if parsed else None
+
+    @staticmethod
+    def _message_group_name(element: Any, automation: Any, uia_types: Any) -> str:
+        """Name of the row's first message group, which still contains emoji."""
+
+        try:
+            condition = automation.CreatePropertyCondition(
+                uia_types.UIA_ControlTypePropertyId,
+                uia_types.UIA_GroupControlTypeId,
+            )
+            group = element.FindFirst(uia_types.TreeScope_Descendants, condition)
+            if group is None:
+                return ""
+            group_name = str(group.CurrentName or "")
+            return group_name if "Anime Guessing Game" in group_name else ""
+        except Exception:
+            LOGGER.debug("Card message group read failed", exc_info=True)
+            return ""
 
     _QUESTION_LABEL = re.compile(r"Question\s*(\d+)\s*/\s*(\d+)", re.IGNORECASE)
     _ANSWER_TYPE = re.compile(
