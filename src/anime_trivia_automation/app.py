@@ -40,6 +40,7 @@ from .utils import (
     ensure_directory,
     normalize_accessible_clue,
     normalize_question,
+    quiz_answer_form,
     sanitize_answer,
 )
 from .vlm import LazyQwenResolver
@@ -202,6 +203,21 @@ class AnimeTriviaAutomation:
         # solver is enabled: the quote lookup is a sub-3 ms exact path that owes
         # nothing to that solver, and leaving it behind a disabled flag wasted
         # it on every round until now.
+        # Every answer this quiz has actually revealed, which is the only
+        # evidence we have about the spellings it accepts.
+        self._known_answer_forms: tuple[str, ...] = ()
+        try:
+            reviewed = json.loads(
+                config.runtime.history_path.read_text(encoding="utf-8")
+            )
+            self._known_answer_forms = tuple(
+                sorted({str(p["answer"]).strip() for p in reviewed.get("pairs", [])})
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            LOGGER.warning(
+                "Could not read reviewed answers; local answers keep corpus spelling",
+                exc_info=True,
+            )
         self._quotes: KnowledgeIndex | None = None
         index_path = getattr(config.novel, "knowledge_index_path", None)
         if index_path is not None:
@@ -1803,16 +1819,24 @@ class AnimeTriviaAutomation:
                     resolved = None
                 if resolved is not None:
                     title, matched = resolved
+                    # The corpus spells titles its own way ("Haikyuu!!",
+                    # "Tengen Toppa Gurren Lagann") while the quiz accepts its
+                    # own ("Haikyu", "Gurren Lagann"), and a wrong form does get
+                    # refused: "Digimon: Digital Monsters" was rejected for
+                    # "Digimon Adventure" on 2026-09-03. Prefer a form this quiz
+                    # has actually revealed before.
+                    quiz_form = self._quiz_answer_form(title)
                     LOGGER.info(
-                        "Quotation resolved locally: %r -> %s (matched %r)",
+                        "Quotation resolved locally: %r -> %s%s (matched %r)",
                         accessible.clue[:60],
-                        title,
+                        quiz_form,
+                        "" if quiz_form == title else f" [corpus said {title!r}]",
                         matched[:60],
                     )
                     return CacheHit(
                         kind="local-quote",
                         key=normalize_question(accessible.clue),
-                        answer=title,
+                        answer=quiz_form,
                         score=100.0,
                     )
         # An emoji rebus reaches neither exact nor fuzzy matching: the bot never
@@ -1833,6 +1857,11 @@ class AnimeTriviaAutomation:
                 affinity.runner_up_score or 0.0,
             )
         return affinity
+
+    def _quiz_answer_form(self, title: str) -> str:
+        """A corpus title in the spelling this quiz has accepted before."""
+
+        return quiz_answer_form(title, self._known_answer_forms)
 
     def _rehearsal_clue(self, observation: PromptObservation) -> tuple[Any, bool]:
         """Clue injected by scripts/rehearse_batch.py for a painted card."""

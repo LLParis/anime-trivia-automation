@@ -2011,5 +2011,44 @@ class LocalQuoteTests(unittest.TestCase):
         index = self._index([("A corpse is talking.", "Chainsaw Man")])
         self.assertIsNone(index.match_quote('"Something nobody ever said."'))
 
+
+class QuizAnswerFormTests(unittest.TestCase):
+    """A local answer must be typed the way this quiz spells it.
+
+    The corpus and the quiz disagree on titles, and a wrong form gets refused:
+    Anime Soul rejected "Digimon: Digital Monsters" for the reveal "Digimon
+    Adventure" on 2026-09-03. The reveals in the reviewed history are the only
+    evidence we have about accepted spellings.
+    """
+
+    KNOWN = ("Haikyu", "Gurren Lagann", "Chainsaw Man", "Hyouka", "Bleach")
+
+    def test_a_longer_corpus_title_becomes_the_revealed_one(self) -> None:
+        from anime_trivia_automation.utils import quiz_answer_form
+
+        self.assertEqual(
+            quiz_answer_form("Tengen Toppa Gurren Lagann", self.KNOWN),
+            "Gurren Lagann",
+        )
+
+    def test_romanization_drift_is_absorbed(self) -> None:
+        from anime_trivia_automation.utils import quiz_answer_form
+
+        self.assertEqual(quiz_answer_form("Haikyuu!!", self.KNOWN), "Haikyu")
+
+    def test_an_unknown_title_keeps_its_own_spelling(self) -> None:
+        from anime_trivia_automation.utils import quiz_answer_form
+
+        # Nothing to map onto is not a licence to invent one.
+        self.assertEqual(
+            quiz_answer_form("Bungou Stray Dogs 2nd Season", self.KNOWN),
+            "Bungou Stray Dogs 2nd Season",
+        )
+
+    def test_an_exact_match_is_left_alone(self) -> None:
+        from anime_trivia_automation.utils import quiz_answer_form
+
+        self.assertEqual(quiz_answer_form("Chainsaw Man", self.KNOWN), "Chainsaw Man")
+
 if __name__ == "__main__":
     unittest.main()

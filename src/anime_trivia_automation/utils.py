@@ -6,6 +6,7 @@ import queue
 import re
 import time
 import unicodedata
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Generic, TypeVar
 
@@ -65,6 +66,44 @@ def humanize_answer(answer: str, *, lowercase: bool = True, strip_punctuation: b
         value = value.casefold()
     value = " ".join(value.split())
     return value or answer
+
+
+def quiz_answer_form(title: str, known_forms: Sequence[str]) -> str:
+    """Rewrite a title into a spelling this quiz has actually revealed.
+
+    The local corpus spells titles its own way ("Haikyuu!!", "Tengen Toppa
+    Gurren Lagann") while Anime Soul accepts its own ("Haikyu", "Gurren
+    Lagann"), and a wrong form does get refused: "Digimon: Digital Monsters"
+    was rejected for "Digimon Adventure" on 2026-09-03. The reveals in the
+    reviewed history are the only evidence we have about accepted spellings.
+
+    Contiguous containment either way catches a title the corpus states in
+    full; a close fuzzy ratio catches romanization drift. The shortest matching
+    form wins, since the rejection above was of the longer one.
+    """
+
+    words = normalize_question(title).split()
+    if not words:
+        return title
+    from rapidfuzz import fuzz
+
+    joined = " ".join(words)
+    best: str | None = None
+    for known in known_forms:
+        candidate = normalize_question(known).split()
+        if not candidate:
+            continue
+        contained = any(
+            words[start : start + len(candidate)] == candidate
+            for start in range(len(words) - len(candidate) + 1)
+        ) or any(
+            candidate[start : start + len(words)] == words
+            for start in range(len(candidate) - len(words) + 1)
+        )
+        if contained or fuzz.ratio(joined, " ".join(candidate)) >= 90:
+            if best is None or len(known) < len(best):
+                best = known
+    return best or title
 
 
 def short_signature(namespace: str, value: str) -> str:
