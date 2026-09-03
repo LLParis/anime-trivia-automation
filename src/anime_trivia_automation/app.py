@@ -457,7 +457,18 @@ class AnimeTriviaAutomation:
             return None
         LOGGER.info("Accent strip flipped %s -> %s; forcing a re-read", expected, observed)
         self._accent_watch = (watch[0], observed, 0)
-        return self._change_gate.force_scene(frame, captured_at)
+        scene = self._change_gate.force_scene(frame, captured_at)
+        if expected == "locked" and observed == "ready":
+            # The strip is the authoritative readiness signal and this frame is
+            # otherwise unchanged, so the clue in hand is still the right one.
+            # Open the gate now instead of spending ~150 ms of the race on an
+            # OCR pass that can only confirm what we already know. The confirming
+            # observation still lands and corrects the state if it disagrees.
+            if self._active_prompt.promote_to_ready(scene.generation):
+                LOGGER.info(
+                    "Green opened from the accent strip; not waiting for OCR"
+                )
+        return scene
 
     def _on_visual_change(self, generation: int) -> None:
         # Pause any in-progress input immediately. OCR will either revalidate

@@ -294,6 +294,36 @@ class ActivePromptState:
             self._condition.notify_all()
             return True
 
+    def promote_to_ready(self, generation: int | None = None) -> bool:
+        """Open the answer gate on accent-strip evidence, same round.
+
+        The strip watcher only inspects frames the change gate judged
+        unchanged, so when the strip flips red to green the card's content is
+        provably identical and its clue is already known. Waiting for the
+        confirming OCR pass costs about 150 ms of the answer race to re-derive
+        what we hold: on 2026-09-03 Kiki was in hand 2.3 s before green and
+        still lost to a human at 1.2 s.
+
+        Deliberately narrow. It never touches the signature or the clue
+        fingerprint, so it cannot retarget a round or revive a closed one, and
+        it only promotes from ``locked`` -- every other transition still waits
+        for OCR.
+        """
+
+        with self._condition:
+            if self._signature is None or self._readiness != "locked":
+                return False
+            next_generation = (
+                self._generation if generation is None else generation
+            )
+            if next_generation < self._generation:
+                return False
+            self._generation = next_generation
+            self._readiness = "ready"
+            self._uncertain = False
+            self._condition.notify_all()
+            return True
+
     def mark_uncertain(self, generation: int | None = None) -> None:
         with self._condition:
             next_generation = self._generation if generation is None else generation

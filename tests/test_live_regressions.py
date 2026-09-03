@@ -1886,5 +1886,49 @@ class EmojiAffinityTests(unittest.TestCase):
         )
         self.assertIsNone(hit)
 
+
+class StripPromotionTests(unittest.TestCase):
+    """Green must open on strip evidence without waiting for a confirming OCR.
+
+    On 2026-09-03 Kiki was solved 2.3 s before answers opened and still lost to
+    a human at 1.2 s. The app posted 0.4 s after IT saw green, so the loss was
+    detection lag, and ~150 ms of that was an OCR pass re-deriving a clue the
+    app already held.
+    """
+
+    def test_a_locked_round_opens_without_a_confirming_read(self) -> None:
+        active = ActivePromptState()
+        active.update("round:anime_title:3/10", "locked", 1, "text:witch")
+        active.mark_uncertain(2)
+        self.assertFalse(active.is_ready("round:anime_title:3/10", "text:witch"))
+
+        self.assertTrue(active.promote_to_ready(2))
+        self.assertTrue(active.is_ready("round:anime_title:3/10", "text:witch"))
+
+    def test_promotion_cannot_retarget_or_revive_a_round(self) -> None:
+        active = ActivePromptState()
+        # A closed round stays closed: only locked is promoted.
+        active.update("round:anime_title:3/10", "closed", 1, "text:witch")
+        self.assertFalse(active.promote_to_ready(1))
+        self.assertFalse(active.is_ready("round:anime_title:3/10", "text:witch"))
+
+        # No live round at all: nothing to promote.
+        active.update(None, "unknown", 2, None)
+        self.assertFalse(active.promote_to_ready(2))
+
+        # The signature and fingerprint survive a promotion untouched, so a
+        # promotion can never open a different round than the one in flight.
+        active.update("round:anime_title:4/10", "locked", 3, "text:car")
+        self.assertTrue(active.promote_to_ready(3))
+        self.assertTrue(active.is_ready("round:anime_title:4/10", "text:car"))
+        self.assertFalse(active.is_ready("round:anime_title:3/10", "text:witch"))
+        self.assertFalse(active.is_ready("round:anime_title:4/10", "text:witch"))
+
+    def test_a_stale_generation_is_refused(self) -> None:
+        active = ActivePromptState()
+        active.update("round:anime_title:5/10", "locked", 7, "text:pot")
+        self.assertFalse(active.promote_to_ready(6))
+        self.assertFalse(active.is_ready("round:anime_title:5/10", "text:pot"))
+
 if __name__ == "__main__":
     unittest.main()
