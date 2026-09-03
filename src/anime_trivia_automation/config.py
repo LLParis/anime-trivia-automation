@@ -373,7 +373,7 @@ class StatusConfig:
     topmost: bool = True
     click_through: bool = True
     width: int = 560
-    height: int = 310
+    height: int = 372
     margin_x: int = 32
     margin_y: int = 32
     opacity: float = 0.96
@@ -662,7 +662,7 @@ def load_config(path: str | Path) -> AppConfig:
         topmost=bool(status_raw.get("topmost", True)),
         click_through=bool(status_raw.get("click_through", True)),
         width=int(status_raw.get("width", 560)),
-        height=int(status_raw.get("height", 310)),
+        height=int(status_raw.get("height", 372)),
         margin_x=int(status_raw.get("margin_x", 32)),
         margin_y=int(status_raw.get("margin_y", 32)),
         opacity=float(status_raw.get("opacity", 0.96)),

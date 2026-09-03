@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -77,6 +78,118 @@ class RoundLedger:
                     LOGGER.debug("Round ledger close failed", exc_info=True)
 
 
+class RoundTracker:
+    """Derives per-round timing and outcome from the events already emitted.
+
+    Lives here rather than in the app so the operator display costs the live
+    typing path nothing: this class only reads the same phase transitions the
+    status writer already receives.
+
+    The three timings it keeps are the ones that decide a round. Answers open
+    3-6 s after a card appears and strong humans answer in 1.2 s, so seeing
+    red-to-answer next to red-to-green is what tells you whether a loss was the
+    solver being slow or our own detection lagging.
+    """
+
+    MAX_ROUNDS = 12
+
+    def __init__(self) -> None:
+        self._rounds: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+        self._current: str | None = None
+
+    def observe(
+        self,
+        phase: str,
+        question: str | None,
+        answer: str | None,
+        source: str | None,
+        readiness: str | None,
+    ) -> None:
+        label = (question or "").strip()
+        if not label or label == "—":
+            return
+        now = time.monotonic()
+        round_state = self._rounds.get(label)
+        if round_state is None:
+            if phase not in {"RED", "GREEN", "RESOLVING", "KNOWN", "NOVEL"}:
+                return
+            round_state = {
+                "label": label,
+                "state": "pending",
+                "red_at": now,
+                "green_at": None,
+                "answer_at": None,
+                "sent_at": None,
+                "source": None,
+                "sent": None,
+            }
+            self._rounds[label] = round_state
+            while len(self._rounds) > self.MAX_ROUNDS:
+                self._rounds.popitem(last=False)
+        self._current = label
+
+        if readiness == "ready" and round_state["green_at"] is None:
+            round_state["green_at"] = now
+            if round_state["state"] == "pending":
+                round_state["state"] = "ready"
+        if phase in {"KNOWN", "NOVEL"} and answer and answer not in ("—", "SKIP"):
+            if round_state["answer_at"] is None:
+                round_state["answer_at"] = now
+                round_state["source"] = source
+        if phase == "SUBMITTED":
+            if round_state["sent_at"] is None:
+                round_state["sent_at"] = now
+            round_state["sent"] = answer
+            round_state["state"] = "sent"
+        if phase == "UNKNOWN" and round_state["state"] in {"pending", "ready"}:
+            round_state["state"] = "skipped"
+        if phase == "LEARNED" and answer:
+            sent = round_state.get("sent")
+            if sent:
+                round_state["state"] = (
+                    "correct" if _answers_agree(sent, answer) else "wrong"
+                )
+            elif round_state["state"] != "sent":
+                round_state["state"] = "missed"
+        if phase == "CLOSED" and round_state["state"] in {"pending", "ready"}:
+            round_state["state"] = "missed"
+
+    def snapshot(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        rounds = [
+            {"label": r["label"], "state": r["state"]} for r in self._rounds.values()
+        ]
+        current = self._rounds.get(self._current or "")
+        if current is None:
+            return rounds, {}
+
+        def gap(start: str, end: str) -> float | None:
+            a, b = current.get(start), current.get(end)
+            return round(b - a, 3) if a is not None and b is not None else None
+
+        timeline = {
+            "since_red": round(time.monotonic() - current["red_at"], 2),
+            "red_to_green": gap("red_at", "green_at"),
+            "red_to_answer": gap("red_at", "answer_at"),
+            "green_to_sent": gap("green_at", "sent_at"),
+            "source": current.get("source"),
+        }
+        return rounds, timeline
+
+
+def _answers_agree(sent: str, reveal: str) -> bool:
+    """Loose agreement, matching how the quiz bot accepts an answer."""
+
+    def norm(value: str) -> str:
+        return " ".join(
+            "".join(c if c.isalnum() else " " for c in value).casefold().split()
+        )
+
+    a, b = norm(sent), norm(reveal)
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
+
+
 class OperatorStatus:
     """Thread-safe structured status state consumed by the no-focus overlay."""
 
@@ -106,6 +219,7 @@ class OperatorStatus:
         self._writer_condition = threading.Condition()
         self._last_written_sequence = 0
         self._writer_thread: threading.Thread | None = None
+        self._tracker = RoundTracker()
         self._state: dict[str, Any] = {
             "schema_version": 1,
             "pid": os.getpid(),
@@ -122,6 +236,8 @@ class OperatorStatus:
             "source": "—",
             "readiness": "unknown",
             "history_entries": 0,
+            "rounds": [],
+            "timeline": {},
             "counters": {
                 "rounds_seen": 0,
                 "known": 0,
@@ -253,6 +369,7 @@ class OperatorStatus:
                     "deduplicated": deduplicated,
                 }
             )
+            self._tracker.observe(phase, question, answer, source, readiness)
             if self._state.get("phase") == "ERROR" and phase != "ERROR":
                 return
             if deduplicated:
@@ -286,6 +403,9 @@ class OperatorStatus:
                     LOGGER.error("Unknown operator counter: %s", increment)
                 else:
                     counters[increment] += 1
+            rounds, timeline = self._tracker.snapshot()
+            self._state["rounds"] = rounds
+            self._state["timeline"] = timeline
             if decrement is not None:
                 counters = self._state["counters"]
                 if decrement not in counters:

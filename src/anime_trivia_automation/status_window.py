@@ -36,6 +36,39 @@ PHASE_COLORS = {
 }
 
 
+# One pip per round. The quiz is ten rounds, so the whole night fits in a strip
+# the operator can read at a glance without parsing any text.
+ROUND_COLORS = {
+    "pending": "#3a3f4b",
+    "ready": "#fee75c",
+    "sent": "#5b8def",
+    "correct": "#2ecc70",
+    "wrong": "#ed4245",
+    "skipped": "#6b7280",
+    "missed": "#6b7280",
+}
+
+# Where an answer came from decides whether it can win: a local path answers in
+# milliseconds, the cloud solver needs seconds and loses to a 1.2 s human.
+SOURCE_BADGES = (
+    ("local-quote", "QUOTE", "#1abc9c"),
+    ("emoji-affinity", "EMOJI", "#1abc9c"),
+    ("history", "HISTORY", "#1abc9c"),
+    ("cache", "CACHE", "#1abc9c"),
+    ("antigravity", "CLOUD", "#5b8def"),
+    ("gemini", "CLOUD", "#5b8def"),
+    ("qwen", "LOCAL LLM", "#8f73ff"),
+)
+
+
+def _badge(source: str) -> tuple[str, str]:
+    folded = (source or "").casefold()
+    for needle, text, color in SOURCE_BADGES:
+        if needle in folded:
+            return text, color
+    return "", "#3a3f4b"
+
+
 def _read_status(path: Path) -> dict[str, Any]:
     """Read while explicitly allowing the worker's atomic replace on Windows."""
 
@@ -340,6 +373,47 @@ def main() -> int:
     )
     source_label.pack(fill="x", pady=(1, 8))
 
+    # Round strip: ten pips, one per round, coloured by outcome.
+    pips = tk.Canvas(
+        body,
+        height=14,
+        bg="#171a22",
+        highlightthickness=0,
+        bd=0,
+    )
+    pips.pack(fill="x", pady=(2, 8))
+
+    # The three numbers that decide a round, side by side: when answers opened,
+    # when we had an answer, and how long the keystrokes took after green.
+    timing_row = tk.Frame(body, bg="#171a22")
+    timing_row.pack(fill="x", pady=(0, 6))
+    timing_labels = {}
+    for key, caption in (
+        ("red_to_green", "GREEN AT"),
+        ("red_to_answer", "ANSWER AT"),
+        ("green_to_sent", "SENT AFTER"),
+    ):
+        cell = tk.Frame(timing_row, bg="#171a22")
+        cell.pack(side="left", expand=True, fill="x")
+        tk.Label(
+            cell,
+            text=caption,
+            bg="#171a22",
+            fg="#6b7280",
+            font=("Segoe UI", 7),
+            anchor="w",
+        ).pack(fill="x")
+        value = tk.Label(
+            cell,
+            text="—",
+            bg="#171a22",
+            fg="#c9ccd4",
+            font=("Consolas", 12),
+            anchor="w",
+        )
+        value.pack(fill="x")
+        timing_labels[key] = value
+
     counters_label = tk.Label(
         body,
         text="Seen 0   Known 0   Unknown 0   Sent 0   Learned 0",
@@ -386,9 +460,52 @@ def main() -> int:
         clue = str(state.get("clue", "—"))
         clue_label.configure(text=f"{question}  {clue}" if question != "—" else clue)
         answer_label.configure(text=f"ANSWER  {state.get('answer', '—')}")
+        source = str(state.get("source", "—"))
+        badge, badge_color = _badge(source)
         source_label.configure(
-            text=f"SOURCE  {state.get('source', '—')}   •   {state.get('readiness', 'unknown')}"
+            text=(
+                f"{badge}  ·  {source}   •   {state.get('readiness', 'unknown')}"
+                if badge
+                else f"SOURCE  {source}   •   {state.get('readiness', 'unknown')}"
+            ),
+            fg=badge_color if badge else "#8b93a7",
         )
+
+        rounds = state.get("rounds") or []
+        current_label = str(state.get("question", ""))
+        pips.delete("all")
+        width = max(pips.winfo_width(), 1)
+        slots = max(len(rounds), 10)
+        gap = 4
+        pip_width = max(6, (width - gap * (slots - 1)) / slots)
+        for index in range(slots):
+            entry = rounds[index] if index < len(rounds) else None
+            fill = ROUND_COLORS.get(
+                (entry or {}).get("state", "pending"), ROUND_COLORS["pending"]
+            ) if entry else "#23262f"
+            x0 = index * (pip_width + gap)
+            pips.create_rectangle(
+                x0, 2, x0 + pip_width, 12, fill=fill, outline=""
+            )
+            # Mark the round in flight, so a glance says both how the night is
+            # going and where in it we are.
+            if entry and entry.get("label") == current_label:
+                pips.create_rectangle(
+                    x0, 0, x0 + pip_width, 14, outline="#ffffff", width=1
+                )
+
+        timeline = state.get("timeline") or {}
+        for key, widget in timing_labels.items():
+            value = timeline.get(key)
+            if value is None:
+                widget.configure(text="—", fg="#4b5563")
+            else:
+                # Green-to-sent is the only one we control end to end, so it is
+                # the one worth colouring against the human floor.
+                color = "#c9ccd4"
+                if key == "green_to_sent":
+                    color = "#2ecc70" if value <= 0.5 else "#f0b232"
+                widget.configure(text=f"{value:.2f}s", fg=color)
         counters = state.get("counters", {})
         counters_label.configure(
             text=(
@@ -396,6 +513,7 @@ def main() -> int:
                 f"Known {counters.get('known', 0)}   "
                 f"Unknown {counters.get('unknown', 0)}   "
                 f"Sent {counters.get('submitted', 0)}   "
+                f"Won {sum(1 for r in rounds if r.get('state') == 'correct')}   "
                 f"Learned {counters.get('learned', 0)}"
             )
         )
