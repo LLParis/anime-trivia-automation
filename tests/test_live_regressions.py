@@ -1305,6 +1305,47 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertTrue(executor._controller.entered)
         self.assertEqual(executor._text_input.sent, ["Bleach"])
         self.assertEqual(composer.text, "")
+        self.assertIsNone(executor._last_owned_answer)
+
+    def test_confirmed_empty_releases_memory_and_persisted_ownership(self) -> None:
+        active = ActivePromptState()
+        signature = "round:anime_title:1/10"
+        active.update(signature, "ready", 1, "text:bleach")
+        composer = FakeComposer()
+        executor = make_executor(active, composer)
+        persisted: list[str | None] = []
+        executor._persist_owned_draft = persisted.append  # type: ignore[method-assign]
+        executor._status = RecordingStatus()
+        task = AnswerTask(
+            answer="Bleach",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="1/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="history-cache",
+            round_token="session-1:round-1",
+            clue_fingerprint="text:bleach",
+        )
+
+        self.assertTrue(executor.execute(task))
+        self.assertEqual(composer.text, "")
+        self.assertIsNone(executor._last_owned_answer)
+        self.assertIn(None, persisted)
+        submitted = [
+            fields
+            for phase, fields in executor._status.events
+            if phase == "SUBMITTED"
+        ]
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(submitted[0].get("increment"), "submitted")
+
+        # A later human who independently types the same answer owns that text.
+        composer.text = "Bleach"
+        claimed, manual = executor._claim_empty_composer(executor._guard.window)
+        self.assertIsNone(claimed)
+        self.assertTrue(manual)
+        self.assertEqual(composer.text, "Bleach")
 
     def test_human_text_in_the_box_is_never_cleared(self) -> None:
         active = ActivePromptState()
@@ -1337,6 +1378,7 @@ class LiveRegressionTests(unittest.TestCase):
         active.update(signature, "ready", 1, "text:steins")
         composer = FakeComposer()
         executor = make_executor(active, composer)
+        executor._status = RecordingStatus()
 
         class DeafController(FakeController):
             def __init__(self, composer, enter_key):
@@ -1365,6 +1407,62 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertEqual(executor._controller.enter_presses, 2)
         # Nothing is left behind to block the next round.
         self.assertEqual(composer.text, "")
+        self.assertIsNone(executor._last_owned_answer)
+        phases = [phase for phase, _fields in executor._status.events]
+        self.assertIn("ATTENTION", phases)
+        self.assertNotIn("SUBMITTED", phases)
+
+    def test_second_enter_is_canceled_after_exact_green_round_closes(self) -> None:
+        active = ActivePromptState()
+        signature = "round:anime_title:7/10"
+        fingerprint = "text:steins"
+        active.update(signature, "ready", 1, fingerprint)
+        composer = FakeComposer()
+        executor = make_executor(active, composer)
+        executor._status = RecordingStatus()
+
+        class DeafController(FakeController):
+            def __init__(self, composer, enter_key):
+                super().__init__(composer, enter_key)
+                self.enter_presses = 0
+
+            def press(self, key):
+                if key == self.enter_key:
+                    self.enter_presses += 1
+                    self.entered = True
+                    return
+                super().press(key)
+
+        executor._controller = DeafController(composer, executor._enter_key)
+        wait_calls = 0
+
+        def close_during_first_confirmation(_composer, _timeout):
+            nonlocal wait_calls
+            wait_calls += 1
+            if wait_calls == 1:
+                active.update(signature, "closed", 2, fingerprint)
+            return False
+
+        executor._wait_for_clear = close_during_first_confirmation  # type: ignore[method-assign]
+        task = AnswerTask(
+            answer="Steins Gate",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="7/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="history-cache",
+            round_token="session-1:round-7",
+            clue_fingerprint=fingerprint,
+        )
+
+        self.assertTrue(executor.execute(task))
+        self.assertEqual(executor._controller.enter_presses, 1)
+        self.assertEqual(composer.text, "")
+        self.assertIsNone(executor._last_owned_answer)
+        phases = [phase for phase, _fields in executor._status.events]
+        self.assertIn("ATTENTION", phases)
+        self.assertNotIn("SUBMITTED", phases)
 
     def test_latest_only_dispatch_replaces_stale_fingerprint_variants(self) -> None:
         active = ActivePromptState()

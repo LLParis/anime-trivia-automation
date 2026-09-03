@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source": "Anime Soul bot reveals, accepted-live correlations, and per-row labeled user-capture cross-checks; only rows marked bot-reveal are bot-confirmed",
-  "captured_utc": "2026-09-02T19:08:58Z",
+  "captured_utc": "2026-09-03T01:04:14Z",
   "pairs": [
     {"clue": "\"Sometimes living can be hard, but it's only because we're alive that we can make each other laugh, cry, and be happy.\"", "type": "anime_title", "answer": "Fruits Basket"},
     {"clue": "🏍️ 💊 🏙️ 💥", "type": "anime_title", "answer": "Akira"},
@@ -170,6 +170,14 @@
     {"clue": "👽 ✋ 🧠 🏥", "type": "anime_title", "answer": "Parasyte the Maxim", "verification": "bot-reveal-transcript-2026-09-02-12"},
     {"clue": "🏍️ 🏚️ ❄️ 🥫", "type": "anime_title", "answer": "Girls' Last Tour", "verification": "bot-reveal-transcript-2026-09-02-12"},
     {"clue": "💀 🧙‍♂️ 🌹 🧚‍♀️", "type": "anime_title", "answer": "The Ancient Magus' Bride", "verification": "bot-reveal-transcript-2026-09-02-12"},
-    {"clue": "\"No matter where you go, everyone's connected.\"", "type": "anime_title", "answer": "Serial Experiments Lain", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-02-12"}
+    {"clue": "\"No matter where you go, everyone's connected.\"", "type": "anime_title", "answer": "Serial Experiments Lain", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-02-12"},
+    {"clue": "🎸 🚬 🏠 7️⃣", "type": "anime_title", "answer": "Nana", "verification": "user-screenshot-plus-runtime-paired-bot-reveal-2026-09-02-18"},
+    {"clue": "🧪 🌿 🏯 🐈", "type": "anime_title", "answer": "The Apothecary Diaries", "verification": "user-screenshot-plus-runtime-paired-bot-reveal-2026-09-02-18"},
+    {"clue": "A red-haired footballer whose exceptional speed earns him the nickname Red Panther.", "type": "character", "answer": "Hyoma Chigiri", "verification": "runtime-paired-bot-reveal-2026-09-02-18"},
+    {"clue": "\"Admiration is the state furthest from understanding.\"", "type": "anime_title", "answer": "Bleach", "verification": "runtime-paired-bot-reveal-2026-09-02-18"},
+    {"clue": "A serious Public Safety devil hunter who fights with a sword, keeps his apartment tidy, and looks after two chaotic partners.", "type": "character", "answer": "Aki Hayakawa", "verification": "runtime-paired-bot-reveal-2026-09-02-18"},
+    {"clue": "A confident blond esper who once considered himself superior to everyone else before learning humility from another psychic.", "type": "character", "answer": "Teruki Hanazawa", "verification": "runtime-paired-bot-reveal-2026-09-02-18"},
+    {"clue": "\"This must be the choice of Steins Gate.\"", "type": "anime_title", "answer": "Steins Gate", "verification": "runtime-paired-bot-reveal-2026-09-02-18"},
+    {"clue": "\"You believe in aliens, but not ghosts?\"", "type": "anime_title", "answer": "Dandadan", "verification": "runtime-paired-bot-reveal-2026-09-02-18"}
   ]
 }

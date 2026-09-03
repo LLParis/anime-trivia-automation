@@ -26,9 +26,14 @@ from PIL import Image, ImageTk
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from anime_trivia_automation.config import load_config  # noqa: E402
-from anime_trivia_automation.utils import normalize_question  # noqa: E402
-from rehearse_live import compose, recolor_accent_to_green  # noqa: E402
+from rehearse_live import (
+    compose,
+    recolor_accent_to_green,
+    require_rehearsal_worker,
+)
+
+from anime_trivia_automation.config import load_config
+from anime_trivia_automation.utils import normalize_question
 
 REHEARSAL_LINE = re.compile(
     r"^(\d\d:\d\d:\d\d\.\d\d\d) WARNING .*REHEARSAL: (?:'(.+?)'|\"(.+?)\") is typed and verified"
@@ -78,6 +83,10 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(args.config)
+    rehearsal_run_id = require_rehearsal_worker(
+        config.runtime.status_path,
+        max_age_seconds=config.status.stale_after_seconds,
+    )
     left, top, right, bottom = config.capture.region
     width, height = right - left, bottom - top
     kinds = set(args.kinds.split(","))
@@ -120,6 +129,11 @@ def main() -> int:
 
     results = []
     for index, card in enumerate(cards, 1):
+        require_rehearsal_worker(
+            config.runtime.status_path,
+            expected_run_id=rehearsal_run_id,
+            max_age_seconds=config.status.stale_after_seconds,
+        )
         image = Image.open(Path(args.screens) / card["file"])
         y = max(0, height - image.height - 240)
         red = ImageTk.PhotoImage(compose((width, height), image, (24, y)))
@@ -146,6 +160,11 @@ def main() -> int:
         label.configure(image=red)
         root.update()
         time.sleep(args.red)
+        require_rehearsal_worker(
+            config.runtime.status_path,
+            expected_run_id=rehearsal_run_id,
+            max_age_seconds=config.status.stale_after_seconds,
+        )
         label.configure(image=green)
         root.update()
         green_at = time.perf_counter()
@@ -202,10 +221,29 @@ def main() -> int:
                     controller.release("a")
                 controller.press(Key.backspace)
                 controller.release(Key.backspace)
-                print(f"cleared the last practice answer {last!r} from the composer", flush=True)
-                owned = config.runtime.status_path.parent / "owned_draft.json"
-                if owned.exists():
-                    owned.unlink()
+                deadline = time.monotonic() + max(
+                    1.0, float(config.typing.composer_settle_timeout_seconds)
+                )
+                while composer.value() != "" and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                if composer.value() == "":
+                    print(
+                        f"cleared and verified the last practice answer {last!r}",
+                        flush=True,
+                    )
+                    owned = config.runtime.status_path.parent / "owned_draft.json"
+                    if owned.exists():
+                        owned.unlink()
+                else:
+                    print(
+                        "could not verify final practice cleanup; ownership marker retained",
+                        flush=True,
+                    )
+            else:
+                print(
+                    "final practice cleanup skipped: exact owned composer was unavailable",
+                    flush=True,
+                )
         except Exception as exc:
             print(f"could not clear the last answer: {type(exc).__name__}", flush=True)
     ok = sum(1 for r in results if r["ok"])

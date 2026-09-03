@@ -86,6 +86,7 @@ class OperatorStatus:
         path: Path,
         *,
         dry_run: bool,
+        rehearsal: bool = False,
         avoid_region: tuple[int, int, int, int] | None = None,
         ledger_path: Path | None = None,
     ) -> None:
@@ -109,7 +110,9 @@ class OperatorStatus:
             "schema_version": 1,
             "pid": os.getpid(),
             "run_id": self._run_id,
-            "mode": "DRY RUN" if dry_run else "LIVE",
+            "mode": (
+                "DRY RUN" if dry_run else "REHEARSAL" if rehearsal else "LIVE"
+            ),
             "phase": "STARTING",
             "title": "Starting Anime Trivia",
             "detail": "Opening the operator panel",

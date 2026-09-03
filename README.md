@@ -2,16 +2,17 @@
 
 Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, answers from reviewed history first, resolves new clues with account-authenticated Gemini 3.8, and sends the first confident answer as real keyboard input the moment the same card turns green.
 
-Version 0.10.2 is the repair after the 2026-09-02 noon and 18:00 runs, both of which resolved most clues correctly and still lost them at the composer:
+Version 0.10.3 hardens Claude's post-18:00 real-input repair for the next live run:
 
 - **Any live card is answered.** The locked-Question-1 latch is gone. It made the worker ignore every card of a quiz it joined mid-way (all of Q7–Q10 on 2026-09-02 after the launcher crashed and was restarted). Red or green cards are always the live round; only grey cards are inert.
 - **First verified answer wins; later evidence can recover.** A wrong message triggers Discord's five-second slowmode, so follow-up guesses are spaced by at least five seconds. The first grounded answer to arrive is queued immediately; later distinct grounded answers can be tried only while the same card remains green, up to `typing.max_guesses_per_round`. Identical answers are never re-sent.
 - **Confidence and evidence remain real gates.** Antigravity must return a high-confidence structured answer. Local Qwen is a disabled workstation fallback after its 2026-09-02 evaluation produced only 7/20 correct first answers; when enabled elsewhere, an answer must match independent retrieved evidence and ungrounded alternatives are discarded.
-- **The measured provider is primary.** Account-authenticated Antigravity Gemini 3.8 handles Discord semantic text and emoji. The Gemini 3.8 Developer API is enabled only for a raw-image or account-provider-unavailable fallback; its circuit stops all later calls for five minutes after the first rate-limit error. Local Qwen submission remains disabled.
+- **The measured provider is primary.** Account-authenticated Antigravity Gemini 3.8 handles Discord semantic text and emoji. On this workstation both the quota-exhausted Gemini Developer API and the lower-accuracy local Qwen submission lane are disabled; an unseen raw image with no Discord semantic clue therefore abstains instead of pretending it has a working fallback.
 - **Works while you research manually.** If Chrome/Gemini is in front when the card turns green, the app waits until you have been input-idle for `typing.activation_idle_ms`, raises the one Discord window itself, sends the answer, then hands focus back to the previous window.
 - **The answer is real input, sent once, verified once.** At green the complete answer goes into the composer as one `SendInput` batch of Unicode key events (`typing.composer_write_mode = "type"`), which Discord's Slate editor honours the way it honours typing. The accessibility value is checked once after a settle window instead of per character: measured on the live window on 2026-09-02, the value trails the keystrokes by about 40 ms, which is why per-character checks stranded a one-letter prefix at noon, and the UI Automation ValuePattern write (still available as `"uia"`) put text in the box that Enter did not send at 18:00 (Q3, Q7).
-- **Nothing is ever left stuck in the box.** After Enter the app waits up to a second for the composer to clear, presses Enter once more if its own text is still there, and otherwise erases exactly that text with select-all/backspace. If its own previous answer is still in the composer when the next round starts, it is cleared the same way; any other text is treated as yours and never touched (at 18:00 stuck text from Q3 and Q7 made the app skip Q4, Q5, and Q9 as "manual").
-- **Emoji cards are read even when Discord renders them differently.** The accessibility card parser falls back to structural parsing (status word ... "Answer with the ...") and to the bare emoji sequence, and logs any card name it cannot parse; at 18:00 four emoji rounds got no semantic read and went only to the slow API lane.
+- **Nothing is ever left stuck in the box.** After Enter the app waits up to a second for the composer to clear. A second Enter must pass the same exact green-round, fingerprint, window, focus, and ownership gate; otherwise it is canceled. An unchanged stuck answer is erased with select-all/backspace, but cleanup is reported as unconfirmed—not as a submission. Confirmed empty or cleanup releases all ownership so an identical later human draft is never erased.
+- **Practice cannot post.** Rehearsal status is explicitly labeled `REHEARSAL`, never increments the submitted counter, and both card-painting tools refuse to run unless a fresh live rehearsal worker with the same run ID owns the status file. Repeated practice question numbers remain distinct in reports by round token.
+- **Emoji cards are read even when Discord renders them differently.** The accessibility reader prefers the card's inner message group, which preserves emoji even when the outer Discord row drops them, then falls back to structural parsing (status word ... "Answer with the ...") and the bare emoji sequence. The inner-group path recovered the real 18:00 Q10 sequence in 127 ms after the quiz; exact reviewed pHashes remain the repeat-card fallback.
 - **Every round is on disk.** `runtime/logs/anime-trivia-<stamp>.log` holds the full per-launch log and `runtime/round_ledger.jsonl` records every status event with timestamps, so a failed quiz can be reconstructed instead of guessed at.
 
 ```text
@@ -19,10 +20,10 @@ DXcam 60 FPS physical-pixel crop
   -> CUDA change/stability gate
   -> PaddleOCR GPU + newest-card/readiness extraction
   -> Discord UI Automation semantic clue read (exact text/emoji)
-       -> reviewed 168-pair history (exact text + exact emoji)
+       -> reviewed 176-pair history (exact text + exact emoji)
        -> fuzzy text cache / strict pHash cache
        -> unseen semantic clue: Antigravity Gemini 3.8 Low
-       -> raw image or account outage: one Gemini 3.8 Developer API fallback
+       -> raw image without semantics or pHash: abstain (API and local VLM off)
        -> unresolved: warn and abstain; manual play stays available
   -> at green: raise Discord if needed (operator idle), claim the empty
      #💜anime-chat composer, SendInput the complete answer, verify once, Enter,
@@ -66,9 +67,9 @@ An accent-strip watcher samples the live card's colour band on every captured fr
 - `src/anime_trivia_automation/antigravity.py` — account-authenticated Gemini 3.8 Low CLI provider with structured output, emoji reading, environment isolation, output bounds, absolute deadlines, and owned process-tree shutdown.
 - `src/anime_trivia_automation/knowledge.py` — read-only exact-quote and FTS5 access to the local source-attributed anime index.
 - `src/anime_trivia_automation/vlm.py` — experimental in-process local VLM; live submission is disabled in config.
-- `data/trivia_history.seed.json` — 168 reviewed clue→answer pairs with per-row provenance.
-- `data/answer_catalog.seed.json` — 234 canonical answer strings used for spelling canonicalization.
-- `data/trivia_cache.seed.json` — reviewed text/pHash starter cache; `data/trivia_cache.json` is the ignored mutable cache.
+- `data/trivia_history.seed.json` — 176 reviewed clue→answer pairs with per-row provenance.
+- `data/answer_catalog.seed.json` — 237 canonical answer strings used for spelling canonicalization.
+- `data/trivia_cache.seed.json` — 21 reviewed text keys and 31 reviewed pHashes; `data/trivia_cache.json` is the ignored mutable cache.
 - `scripts/eval_resolvers.py` — offline accuracy/latency report of a provider over the reviewed history (no Discord, no keyboard).
 - `scripts/replay_screenshots.py` — one-warmup offline replay of saved cards.
 - `scripts/build_anime_knowledge.py` — streamed, atomic index build from the private local AniList, quote, and Manami source files.
@@ -86,7 +87,7 @@ Copy-Item .\config.example.json .\config.json
 
 The installed workstation config is already calibrated and should not be overwritten unless recalibrating. The Windows installer creates `.venv`, installs the checkout in editable mode, and uses the shared CUDA PyTorch runtime for PaddleOCR and the frame gate.
 
-The workstation config enables the signed Antigravity CLI at `D:\11_CS\00_TOOLS\Antigravity\agy.exe` (`gemini-3.8-flash-low`) and validates its Google LLC Authenticode signature on every launch, so signed automatic CLI updates do not break the path. Gemini 3.8 Developer API is enabled only as the controlled fallback above; local Qwen submission is disabled. The API key is never stored in JSON or the repository, and Antigravity child processes never receive it.
+The workstation config enables the signed Antigravity CLI at `D:\11_CS\00_TOOLS\Antigravity\agy.exe` (`gemini-3.8-flash-low`) with a 12-second absolute answer deadline and validates its Google LLC Authenticode signature on every launch, so signed automatic CLI updates do not break the path. Gemini 3.8 Developer API and local Qwen submission are both disabled on the workstation. The dormant API key is never stored in JSON or the repository, and Antigravity child processes never receive it.
 
 ## Calibrate the capture region
 
@@ -154,9 +155,8 @@ Resolution order for a live card:
 2. fuzzy verified-history/text match with threshold and runner-up margin;
 3. strict pHash match with Hamming-distance and ambiguity margins;
 4. account-authenticated Antigravity Gemini 3.8 Low for a new Discord-semantic clue;
-5. at most one Gemini 3.8 Developer API call when a raw image lacks Discord semantics or the account provider is unavailable and its rate-limit circuit is closed;
-6. only independently grounded local fallbacks may submit when explicitly enabled;
-7. otherwise abstain.
+5. optional configured fallbacks may run only when explicitly enabled (both Developer API and local Qwen are off on this workstation);
+6. otherwise abstain.
 
 No solver answer is written directly to the durable cache. A clue becomes durable only after the same round has progressed red/green→closed and the bot posts exactly one newly observed official reveal. Discord's semantic bot result is primary; spatial OCR is the fallback.
 
@@ -167,7 +167,7 @@ The mutable cache schema is JSON with text, pHash, and semantic maps plus per-en
 - DXcam captures the calibrated region at 60 FPS; CUDA thumbnail/tile comparison suppresses duplicate frames and stabilizes three frames before OCR.
 - The colored-accent prelocator keeps active-card OCR near 60–100 ms; closed grey cards fall back to the full band (400–700 ms).
 - History/cache lookups are effectively immediate.
-- Measured 2026-09-02: Antigravity answered five real text cards correctly in roughly 3.6–4.6 s when it returned before deadline. The local Qwen speed was 1–4 s but only 7/20 evaluated first answers were correct, so it is disabled on the workstation. A wasteful Developer API evaluation returned 0/24; batch evaluation is now blocked and the API is reserved for live fallback.
+- Measured 2026-09-02: Antigravity answered all 11 real semantic cards it attempted correctly across the noon and 18:00 quizzes, with 3.2–5.0 s provider latency. A direct 40-clue review scored 36/40 exact first answers (37/40 when the equivalent `Mushi-Shi` spelling is counted), median 3.57 s; two emoji clues hit the 12-second deadline. Local Qwen produced only 7/20 exact first answers, so it is disabled. The Developer API evaluation was quota/runtime blocked (22 errors and two timeouts), not an intelligence result, and that API is disabled on the workstation.
 - Real Discord integration probe on 2026-09-02: complete-value acknowledgment took 16–22 ms and verified clearing took 15–17 ms across three focused round trips; no Enter was pressed. Live Green→Enter also includes the readiness OCR pass and 60 ms ownership slack.
 
 ## Implementation references

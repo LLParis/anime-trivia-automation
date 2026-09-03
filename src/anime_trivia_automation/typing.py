@@ -569,13 +569,14 @@ class SafeKeyboardExecutor:
                             time.sleep(0.1)
                         if self._keystroke_clear(peek, value):
                             LOGGER.info("Cleared this app's own leftover %r at launch", value)
-                            self._persist_owned_draft(None)
+                            self._release_owned_draft_claim()
                             value = ""
                 occupied = bool(value)
             except Exception:
                 LOGGER.warning("Composer inspection failed during the probe", exc_info=True)
                 occupied = False
             if not occupied:
+                self._release_owned_draft_claim()
                 break
             if not waited_for_empty:
                 LOGGER.warning(
@@ -713,7 +714,7 @@ class SafeKeyboardExecutor:
             return False
         current = composer.value()
         if current == "":
-            self._orphaned_draft = None
+            self._release_owned_draft_claim()
             return True
         if current != expected:
             LOGGER.warning(
@@ -722,7 +723,7 @@ class SafeKeyboardExecutor:
             self._orphaned_draft = None
             return False
         if self._clear_owned_draft(composer, expected):
-            self._orphaned_draft = None
+            self._release_owned_draft_claim()
             return True
         return False
 
@@ -748,7 +749,10 @@ class SafeKeyboardExecutor:
             )
             if not self._keystroke_clear(composer, current_value):
                 return None, True
+            self._release_owned_draft_claim()
             current_value = composer.value()
+        if current_value == "":
+            self._release_owned_draft_claim()
         if current_value != "":
             LOGGER.warning("Typing skipped: Discord composer is not empty")
             return None, True
@@ -796,6 +800,7 @@ class SafeKeyboardExecutor:
                 )
                 return False
             if self._keystroke_clear(composer, expected_prefix):
+                self._release_owned_draft_claim()
                 LOGGER.info("Cleared exact macro-owned draft after cancellation")
                 return True
             composer.clear_owned_value()
@@ -807,6 +812,7 @@ class SafeKeyboardExecutor:
             if current_value != "":
                 LOGGER.warning("Targeted Discord draft cleanup did not clear the editor")
                 return False
+            self._release_owned_draft_claim()
             LOGGER.info("Cleared exact macro-owned draft after cancellation")
             return True
         except Exception:
@@ -845,6 +851,13 @@ class SafeKeyboardExecutor:
                 path.unlink()
         except OSError:
             LOGGER.debug("Could not persist the owned draft", exc_info=True)
+
+    def _release_owned_draft_claim(self) -> None:
+        """Forget automation ownership once the composer is confirmed empty."""
+
+        self._last_owned_answer = None
+        self._orphaned_draft = None
+        self._persist_owned_draft(None)
 
     def _keystroke_clear(self, composer: DiscordComposer, expected: str) -> bool:
         """Select-all + Backspace inside the focused composer holding our text.
@@ -1245,12 +1258,34 @@ class SafeKeyboardExecutor:
             time.sleep(0.01)
         if final_value.startswith(answer) and final_value != answer:
             LOGGER.warning("Composer contains more than the owned answer; not sending")
+            self._release_owned_draft_claim()
             return "manual"
         if final_value and answer.startswith(final_value):
             # Keys were dropped or the value is still trailing; finish the
             # suffix once and re-verify before giving up on the round.
             missing = answer[len(final_value):]
             LOGGER.info("Composer shows a %d-character prefix; typing the rest", len(final_value))
+            if not prompt_live():
+                self._clear_or_remember(composer, final_value)
+                return "stale"
+            current_window = self._guard.current()
+            allowed, _reason = self._guard.validate(current_window)
+            if (
+                not allowed
+                or current_window is None
+                or current_window.hwnd != window.hwnd
+            ):
+                self._clear_or_remember(composer, final_value)
+                return "retry"
+            try:
+                if composer.value() != final_value:
+                    return "manual"
+                if not composer.focused():
+                    self._clear_or_remember(composer, final_value)
+                    return "retry"
+            except Exception:
+                self._remember_orphan(final_value)
+                return "ambiguous"
             try:
                 self._text_input.send_text(missing)
             except Exception:
@@ -1265,8 +1300,10 @@ class SafeKeyboardExecutor:
             return "ambiguous"
         if final_value == "":
             LOGGER.warning("Keystrokes did not reach the composer; nothing to send")
+            self._release_owned_draft_claim()
             return "retry"
         LOGGER.warning("Composer holds unexpected text after typing; not sending")
+        self._release_owned_draft_claim()
         return "manual"
 
     def _set_complete_answer(
@@ -1504,7 +1541,11 @@ class SafeKeyboardExecutor:
         self._status.emit(
             "DRAFTING",
             title=f"Complete answer staged — {task.question_label or 'Question'}",
-            detail="Composer holds the complete answer after green; sending Enter",
+            detail=(
+                "Composer holds the complete answer; Enter is withheld for rehearsal"
+                if not self._config.press_enter
+                else "Composer holds the complete answer after green; sending Enter"
+            ),
             question=task.question_label or "Question",
             answer=answer,
             source=task.source,
@@ -1530,7 +1571,6 @@ class SafeKeyboardExecutor:
                 source=task.source,
                 readiness="ready",
                 event_id=f"{event_token}:rehearsal",
-                increment="submitted",
             )
             # Still ours: the next rehearsal round (or the next launch) clears
             # it if untouched, so nothing has to be deleted by hand.
@@ -1539,9 +1579,13 @@ class SafeKeyboardExecutor:
             return True
 
         def dispatch_enter_if_owned() -> bool:
-            window = self._guard.current()
-            allowed, reason = self._guard.validate(window)
-            if not allowed:
+            current_window = self._guard.current()
+            allowed, reason = self._guard.validate(current_window)
+            if (
+                not allowed
+                or current_window is None
+                or current_window.hwnd != window.hwnd
+            ):
                 LOGGER.warning("Typing aborted before Enter: %s", reason)
                 return False
             if composer is not None:
@@ -1576,86 +1620,118 @@ class SafeKeyboardExecutor:
                 )
             return True
 
-        if self._readiness_config.require_green_outline:
-            dispatched = self._active_prompt.execute_if_ready(
-                task.prompt_signature,
-                self._stop_event,
-                dispatch_enter_if_owned,
-                clue_fingerprint=task.clue_fingerprint,
-            )
-        else:
-            dispatched = dispatch_enter_if_owned()
+        def dispatch_enter_for_current_round() -> bool:
+            if self._readiness_config.require_green_outline:
+                return self._active_prompt.execute_if_ready(
+                    task.prompt_signature,
+                    self._stop_event,
+                    dispatch_enter_if_owned,
+                    clue_fingerprint=task.clue_fingerprint,
+                )
+            if not self._active_prompt.is_open(
+                task.prompt_signature, task.clue_fingerprint
+            ):
+                return False
+            return dispatch_enter_if_owned()
+
+        dispatched = dispatch_enter_for_current_round()
         if not dispatched:
             self._clear_or_remember(composer, answer)
             self.suppress_task(task, "final ownership or green-state check failed")
             return False
 
-        self._status.emit(
-            "SUBMITTED",
-            title=f"Enter sent — {task.question_label or 'Question'}",
-            detail=(
-                "Submission outcome consumed; duplicates are suppressed"
-                if task.guess_index == 1
-                else f"Follow-up guess {task.guess_index} sent while the card stayed green"
-            ),
-            question=task.question_label or "Question",
-            answer=answer,
-            source=task.source,
-            readiness="ready",
-            event_id=f"{event_token}:guess{task.guess_index}",
-            increment="submitted",
-        )
-        if composer is not None:
-            try:
-                cleared = self._wait_for_clear(composer, 1.0)
-                if not cleared and composer.value() == answer:
-                    # Enter can land while Slate is still digesting the last
-                    # keystrokes; one more Enter is safe because the text is
-                    # still ours and nothing has been sent yet.
-                    LOGGER.warning("Composer did not clear after Enter; pressing Enter once more")
-                    self._controller.press(self._enter_key)
-                    self._controller.release(self._enter_key)
-                    cleared = self._wait_for_clear(composer, 1.0)
-                if not cleared and composer.value() == answer:
+        if composer is None:
+            self._restore_foreground()
+            self._status.emit(
+                "ATTENTION",
+                title="Submission confirmation unavailable",
+                detail="Enter was pressed, but no verified composer was available",
+                question=task.question_label or "Question",
+                answer=answer,
+                source=task.source,
+                readiness="ready",
+                event_id=f"{event_token}:submission-unconfirmed",
+            )
+            return True
+
+        try:
+            delivery_confirmed = self._wait_for_clear(composer, 1.0)
+            cleanup_succeeded = False
+            if not delivery_confirmed and composer.value() == answer:
+                # Retry only through the same exact green, round, window, and
+                # composer-ownership gate as the first Enter. A late retry must
+                # never send an old answer after the card closes or changes.
+                LOGGER.warning(
+                    "Composer did not clear after Enter; rechecking the live round"
+                )
+                retried = dispatch_enter_for_current_round()
+                if retried:
+                    delivery_confirmed = self._wait_for_clear(composer, 1.0)
+                else:
+                    LOGGER.info(
+                        "Second Enter canceled because the exact green round is no longer live"
+                    )
+            if delivery_confirmed:
+                self._release_owned_draft_claim()
+            else:
+                current_value = composer.value()
+                if current_value == answer:
                     # Leave nothing behind: a stuck answer blocked Q4, Q5, and
                     # Q9 on 2026-09-02 18:00 as "manual text".
-                    if not self._keystroke_clear(composer, answer):
+                    if self._keystroke_clear(composer, answer):
+                        self._release_owned_draft_claim()
+                        cleanup_succeeded = True
+                    else:
                         self._persist_owned_draft(answer)
-            except Exception:
-                self._remember_orphan(answer)
-                self._restore_foreground()
-                LOGGER.warning(
-                    "Enter was sent and the Discord editor re-rendered; "
-                    "suppressing any duplicate submission",
-                    exc_info=True,
-                )
-                self._status.emit(
-                    "SUBMITTED",
-                    title="Enter sent — confirmation unavailable",
-                    detail="Discord re-rendered; duplicate submission remains suppressed",
-                    question=task.question_label or "Question",
-                    answer=answer,
-                    source=task.source,
-                    readiness="ready",
-                )
-                return True
-            if not cleared:
-                self._clear_or_remember(composer, answer)
-                self._restore_foreground()
-                LOGGER.warning(
-                    "Enter was sent but Discord did not clear within 2 s; "
-                    "suppressing any duplicate submission"
-                )
-                self._status.emit(
-                    "SUBMITTED",
-                    title="Enter sent — composer did not clear",
-                    detail="The app will not retry this round",
-                    question=task.question_label or "Question",
-                    answer=answer,
-                    source=task.source,
-                    readiness="ready",
-                )
-                return True
+                elif current_value == "":
+                    # The fresh empty composer is the delivery acknowledgement.
+                    delivery_confirmed = True
+                    self._release_owned_draft_claim()
+                elif current_value != "":
+                    # Someone changed the text after our write. It is theirs;
+                    # preserve it and relinquish our stale ownership claim.
+                    self._release_owned_draft_claim()
+        except Exception:
+            self._remember_orphan(answer)
+            self._persist_owned_draft(answer)
+            self._restore_foreground()
+            LOGGER.warning(
+                "Enter was sent but Discord confirmation failed; "
+                "suppressing any duplicate submission",
+                exc_info=True,
+            )
+            self._status.emit(
+                "ATTENTION",
+                title="Submission confirmation unavailable",
+                detail="Discord re-rendered before the composer could confirm delivery",
+                question=task.question_label or "Question",
+                answer=answer,
+                source=task.source,
+                readiness="ready",
+                event_id=f"{event_token}:submission-unconfirmed",
+            )
+            return True
+        if not delivery_confirmed:
+            self._restore_foreground()
+            LOGGER.warning(
+                "Enter was sent but Discord did not clear within 2 s; "
+                "suppressing any duplicate submission"
+            )
+            self._status.emit(
+                "ATTENTION",
+                title="Submission not confirmed",
+                detail=(
+                    "Enter was not acknowledged; the owned draft was cleaned up"
+                    if cleanup_succeeded
+                    else "The composer did not clear; the app will not count or retry it"
+                ),
+                question=task.question_label or "Question",
+                answer=answer,
+                source=task.source,
+                readiness="ready",
+                event_id=f"{event_token}:submission-unconfirmed",
+            )
+            return True
         self._restore_foreground()
         LOGGER.info(
             "Enter dispatched and composer cleared [%s] %s -> %s",
@@ -1671,6 +1747,8 @@ class SafeKeyboardExecutor:
             answer=answer,
             source=task.source,
             readiness="ready",
+            event_id=f"{event_token}:guess{task.guess_index}",
+            increment="submitted",
         )
         return True
 

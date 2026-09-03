@@ -4,6 +4,7 @@ import argparse
 import ctypes
 import logging
 import os
+import sys
 from pathlib import Path
 
 from .app import AnimeTriviaAutomation, inspect_image, print_inspection
@@ -97,6 +98,10 @@ def main() -> int:
         if config.runtime.ledger_path is None or not config.runtime.ledger_path.exists():
             print("No round ledger exists yet.")
             return 1
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
         text, out = write_quiz_report(
             config.runtime.ledger_path,
             config.runtime.log_dir or config.runtime.ledger_path.parent,
@@ -133,6 +138,7 @@ def main() -> int:
                 config.status,
                 config.runtime.status_path,
                 dry_run=args.dry_run,
+                rehearsal=args.rehearse,
                 # The panel is placed on the primary display.  Output-local
                 # capture coordinates are still conservative here: they either
                 # describe that display or make us avoid extra primary space.

@@ -45,7 +45,16 @@
     "b5276c9b4ae993242e10b655fd3749eb95ec2daaf568fd9402d14b2a7a2b0644": "Rurouni Kenshin",
     "b5845ca86a7aa351087da7ded928c81ba713bdb0b7ce402cf7cd7a4c00165bbb": "Parasyte the Maxim",
     "cc661b813399e47e078fcc663fe3303f3399cce6ccc60fe3e03c3b90c07f0780": "Girls' Last Tour",
-    "f596586b4a68e7900a5785fc190ff400f7f81853a7805fe9ff964a563ad0b506": "The Ancient Magus' Bride"
+    "f596586b4a68e7900a5785fc190ff400f7f81853a7805fe9ff964a563ad0b506": "The Ancient Magus' Bride",
+    "913540f46ec2bf0b245b92b166bcc8eece64255cb9d06a359331b1c724d79f2e": "The Apothecary Diaries",
+    "95252de46ed8c61b7afb39f8c72431e038d7c6d6b11425ecb5c1c86e86663b81": "Nana",
+    "9d1562134a7b1dec35e892946297cc21c335a543bc4f63979984bd7866d299bb": "The Apothecary Diaries",
+    "c7cf383011b9ceeff810e38f1ce68f033a39e1e0e8cf0e812799703fcfe03898": "The Apothecary Diaries",
+    "cccc31733333c6181e87c8ec31f10f0fe0fc1e878f81f0e18f0c31ffef183073": "Nana",
+    "cccc31e33333c61c1c87c8e071f11f0fe0fc1cc70f03f0f18e0c31ffe7383339": "Nana",
+    "cce731993331ccf6199d3b64c34c86992cf03996cb33326c66c999933d326766": "Nana",
+    "ce0c30f33ff3cccc6023e31d38c48e2f3873e383e0dc1c0f0f1f30f0ce8738f3": "The Apothecary Diaries",
+    "d91560130afb9fe82548929c6286cc23c737a547b94f6317d9bd3c7826d21bba": "The Apothecary Diaries"
   },
   "metadata": {
     "text_questions": {
@@ -244,6 +253,51 @@
         "created_utc": "2026-09-02T19:08:58Z",
         "hash_size": 16,
         "source": "bot-reveal-transcript-2026-09-02-12"
+      },
+      "913540f46ec2bf0b245b92b166bcc8eece64255cb9d06a359331b1c724d79f2e": {
+        "created_utc": "2026-09-03T01:00:40.827465Z",
+        "hash_size": 16,
+        "source": "runtime-paired-bot-reveal-2026-09-02-18"
+      },
+      "95252de46ed8c61b7afb39f8c72431e038d7c6d6b11425ecb5c1c86e86663b81": {
+        "created_utc": "2026-09-03T01:00:14.848653Z",
+        "hash_size": 16,
+        "source": "runtime-paired-bot-reveal-2026-09-02-18"
+      },
+      "9d1562134a7b1dec35e892946297cc21c335a543bc4f63979984bd7866d299bb": {
+        "created_utc": "2026-09-03T01:00:40.841016Z",
+        "hash_size": 16,
+        "source": "runtime-paired-bot-reveal-2026-09-02-18"
+      },
+      "c7cf383011b9ceeff810e38f1ce68f033a39e1e0e8cf0e812799703fcfe03898": {
+        "created_utc": "2026-09-03T01:00:40.845517Z",
+        "hash_size": 16,
+        "source": "runtime-paired-bot-reveal-2026-09-02-18"
+      },
+      "cccc31733333c6181e87c8ec31f10f0fe0fc1e878f81f0e18f0c31ffef183073": {
+        "created_utc": "2026-09-03T01:00:14.851652Z",
+        "hash_size": 16,
+        "source": "runtime-paired-bot-reveal-2026-09-02-18"
+      },
+      "cccc31e33333c61c1c87c8e071f11f0fe0fc1cc70f03f0f18e0c31ffe7383339": {
+        "created_utc": "2026-09-03T01:00:14.858160Z",
+        "hash_size": 16,
+        "source": "runtime-paired-bot-reveal-2026-09-02-18"
+      },
+      "cce731993331ccf6199d3b64c34c86992cf03996cb33326c66c999933d326766": {
+        "created_utc": "2026-09-03T01:00:14.861161Z",
+        "hash_size": 16,
+        "source": "runtime-paired-bot-reveal-2026-09-02-18"
+      },
+      "ce0c30f33ff3cccc6023e31d38c48e2f3873e383e0dc1c0f0f1f30f0ce8738f3": {
+        "created_utc": "2026-09-03T01:00:40.849025Z",
+        "hash_size": 16,
+        "source": "runtime-paired-bot-reveal-2026-09-02-18"
+      },
+      "d91560130afb9fe82548929c6286cc23c737a547b94f6317d9bd3c7826d21bba": {
+        "created_utc": "2026-09-03T01:00:40.852025Z",
+        "hash_size": 16,
+        "source": "runtime-paired-bot-reveal-2026-09-02-18"
       }
     }
   }

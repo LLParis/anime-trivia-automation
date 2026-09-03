@@ -15,7 +15,17 @@ except ModuleNotFoundError:  # invoked as tests.test_launch_gates
     from tests.test_live_regressions import FakeComposer, SwitchingGuard, make_executor
 
 
-def _row(phase, question, *, answer=None, detail="", clue=None, run="run-1", mono=0.0):
+def _row(
+    phase,
+    question,
+    *,
+    answer=None,
+    detail="",
+    clue=None,
+    run="run-1",
+    mono=0.0,
+    event_id=None,
+):
     return {
         "ts": "2026-09-03T01:00:00",
         "monotonic": mono,
@@ -26,6 +36,7 @@ def _row(phase, question, *, answer=None, detail="", clue=None, run="run-1", mon
         "detail": detail,
         "clue": clue,
         "source": "antigravity-account" if phase == "NOVEL" else None,
+        "event_id": event_id,
     }
 
 
@@ -60,6 +71,87 @@ class QuizReportTests(unittest.TestCase):
         text = render_report(rounds)
         self.assertIn("had the answer but did not send 1", text)
         self.assertIn("| 6/10 |", text)
+
+    def test_report_keeps_repeated_question_labels_as_distinct_rounds(self) -> None:
+        rows = [
+            _row(
+                "RED",
+                "2/10",
+                clue="first painted card",
+                event_id="session-1:round-1:2/10",
+            ),
+            _row(
+                "REHEARSAL",
+                "2/10",
+                answer="First",
+                event_id="session-1:round-1:2/10:rehearsal",
+            ),
+            _row(
+                "RED",
+                "2/10",
+                clue="second painted card",
+                event_id="session-1:round-7:2/10",
+            ),
+            _row(
+                "REHEARSAL",
+                "2/10",
+                answer="Second",
+                event_id="session-1:round-7:2/10:rehearsal",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "ledger.jsonl"
+            ledger.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+            rounds = load_rounds(ledger)
+
+        self.assertEqual(len(rounds), 2)
+        self.assertEqual([item.round_id for item in rounds], [
+            "session-1:round-1",
+            "session-1:round-7",
+        ])
+        self.assertEqual([item.clue for item in rounds], [
+            "first painted card",
+            "second painted card",
+        ])
+
+    def test_unconfirmed_enter_attention_is_not_reported_as_not_sent(self) -> None:
+        rows = [
+            _row(
+                "RED",
+                "3/10",
+                clue="A red-haired footballer",
+                event_id="session-1:round-3:3/10",
+            ),
+            _row(
+                "NOVEL",
+                "3/10",
+                answer="Hyoma Chigiri",
+                event_id="session-1:round-3:3/10",
+            ),
+            {
+                **_row(
+                    "ATTENTION",
+                    "3/10",
+                    answer="Hyoma Chigiri",
+                    detail="Discord re-rendered before the composer could confirm delivery",
+                    event_id="session-1:round-3:3/10:submission-unconfirmed",
+                ),
+                "title": "Submission confirmation unavailable",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "ledger.jsonl"
+            ledger.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+            rounds = load_rounds(ledger)
+
+        self.assertEqual(len(rounds), 1)
+        self.assertEqual(
+            rounds[0].outcome,
+            "UNCONFIRMED (Enter sent, delivery not acknowledged)",
+        )
+        report = render_report(rounds)
+        self.assertIn("unconfirmed 1", report)
+        self.assertIn("sent 0", report)
 
 
 class LiveProbeTests(unittest.TestCase):

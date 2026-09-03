@@ -13,9 +13,12 @@ exactly as it would during a quiz.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 import time
 import tkinter as tk
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -23,9 +26,81 @@ from PIL import Image, ImageTk
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from anime_trivia_automation.config import load_config  # noqa: E402
+from anime_trivia_automation.config import load_config
 
 DISCORD_CHAT_BACKGROUND = (49, 51, 56)
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = wintypes.DWORD()
+            return bool(
+                kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                and exit_code.value == 259  # STILL_ACTIVE
+            )
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def require_rehearsal_worker(
+    status_path: Path,
+    *,
+    expected_run_id: str | None = None,
+    max_age_seconds: float = 5.0,
+) -> str:
+    """Refuse to paint unless a fresh, live rehearsal worker owns the status."""
+
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "No readable rehearsal worker status; start anime-trivia --rehearse first"
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("mode") != "REHEARSAL":
+        raise RuntimeError("Refusing to paint cards: the active worker is not in REHEARSAL mode")
+    run_id = str(payload.get("run_id") or "")
+    if not run_id or (expected_run_id is not None and run_id != expected_run_id):
+        raise RuntimeError("Refusing to paint cards: the rehearsal worker changed")
+    phase = str(payload.get("phase") or "")
+    if phase in {"", "STARTING", "LOADING", "STOPPING", "STOPPED", "ERROR"}:
+        raise RuntimeError(f"Refusing to paint cards: rehearsal worker phase is {phase or 'missing'}")
+    try:
+        updated_at = datetime.fromisoformat(str(payload["updated_at"]))
+        if updated_at.tzinfo is None:
+            raise ValueError("updated_at has no timezone")
+        age = (datetime.now(UTC) - updated_at.astimezone(UTC)).total_seconds()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Refusing to paint cards: rehearsal status timestamp is invalid") from exc
+    if age < -2.0 or age > max(1.0, float(max_age_seconds)):
+        raise RuntimeError(f"Refusing to paint cards: rehearsal status is stale ({age:.1f}s)")
+    try:
+        pid = int(payload.get("pid"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Refusing to paint cards: rehearsal worker PID is invalid") from exc
+    if not _pid_is_running(pid):
+        raise RuntimeError("Refusing to paint cards: rehearsal worker is not running")
+    return run_id
 
 
 def recolor_accent_to_green(card: Image.Image, accent_width: int = 60) -> Image.Image:
@@ -57,6 +132,10 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(args.config)
+    rehearsal_run_id = require_rehearsal_worker(
+        config.runtime.status_path,
+        max_age_seconds=config.status.stale_after_seconds,
+    )
     left, top, right, bottom = config.capture.region
     width, height = right - left, bottom - top
     card = Image.open(args.card)
@@ -85,6 +164,16 @@ def main() -> int:
     print(f"RED card shown at {time.strftime('%H:%M:%S')} inside region {config.capture.region}", flush=True)
 
     def go_green() -> None:
+        try:
+            require_rehearsal_worker(
+                config.runtime.status_path,
+                expected_run_id=rehearsal_run_id,
+                max_age_seconds=config.status.stale_after_seconds,
+            )
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr, flush=True)
+            root.destroy()
+            return
         label.configure(image=green_photo)
         print(f"GREEN card shown at {time.strftime('%H:%M:%S')} (+{time.monotonic()-started:.1f}s)", flush=True)
         root.after(int(args.green * 1000), root.destroy)
