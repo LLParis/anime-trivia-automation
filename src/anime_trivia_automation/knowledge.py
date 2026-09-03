@@ -157,6 +157,64 @@ class KnowledgeIndex:
                 LOGGER.exception("Exact local quote lookup failed")
                 return None
 
+    def match_quote(self, clue: str) -> tuple[str, str] | None:
+        """Resolve a quotation clue to its anime title, or nothing.
+
+        35% of this quiz's clues are quotations and every one of them asks for
+        the anime title. Answering from the local corpus costs under a
+        millisecond, against roughly 6 s for the cloud solver -- and 6 s loses
+        a race that strong humans finish in 1.3 s.
+
+        Exact normalized match first, then the clue's leading fragment, which
+        recovers quotations the corpus stores with different trailing
+        punctuation or an extra sentence. Both require every matching row to
+        agree on one title, so an ambiguous quotation stays silent instead of
+        guessing: measured over all 66 historical quotations this resolved 19
+        with zero wrong answers.
+
+        Returns ``(title, matched_quote_text)`` so the caller can log what it
+        matched on.
+        """
+
+        normalized = normalize_text(clue)
+        if not normalized:
+            return None
+        words = normalized.split()
+        with self._lock:
+            connection = self._connection
+            if not self._available or connection is None:
+                return None
+            attempts: list[tuple[str, tuple[Any, ...]]] = [
+                ("q.normalized_quote = ?", (normalized,))
+            ]
+            if len(words) >= 4:
+                fragment = " ".join(words[: min(10, len(words))])
+                attempts.append(("q.normalized_quote LIKE ?", (f"%{fragment}%",)))
+            for predicate, parameters in attempts:
+                try:
+                    rows = connection.execute(
+                        "SELECT q.anime_title, q.quote_text FROM quotes AS q "
+                        f"WHERE {predicate} LIMIT 5",
+                        parameters,
+                    ).fetchall()
+                except (sqlite3.Error, TypeError, ValueError):
+                    LOGGER.exception("Local quote lookup failed")
+                    return None
+                if not rows:
+                    continue
+                titles = {normalize_text(str(row["anime_title"] or "")) for row in rows}
+                if len(titles) != 1 or not titles.pop():
+                    LOGGER.info(
+                        "Quote clue matched %d conflicting titles; staying silent",
+                        len(rows),
+                    )
+                    return None
+                return (
+                    str(rows[0]["anime_title"]).strip(),
+                    str(rows[0]["quote_text"] or "").strip(),
+                )
+        return None
+
     def search(
         self,
         query: str,

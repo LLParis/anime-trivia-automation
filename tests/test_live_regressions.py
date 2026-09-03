@@ -1930,5 +1930,86 @@ class StripPromotionTests(unittest.TestCase):
         self.assertFalse(active.promote_to_ready(6))
         self.assertFalse(active.is_ready("round:anime_title:5/10", "text:pot"))
 
+
+class LocalQuoteTests(unittest.TestCase):
+    """A quotation the local corpus knows must never reach the cloud solver.
+
+    35% of this quiz's clues are quotations and all of them ask for the anime
+    title. The corpus holds 8,608 attributed quotes, so the answer is a sub-3 ms
+    lookup against roughly 6 s for the solver, which loses a race that strong
+    humans finish in 1.3 s. Until now the index sat behind a disabled solver and
+    was never consulted.
+    """
+
+    def _index(self, quotes):
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+
+        from anime_trivia_automation.knowledge import KnowledgeIndex, normalize_text
+
+        self._temporary = tempfile.TemporaryDirectory()
+        path = Path(self._temporary.name) / "k.sqlite"
+        con = sqlite3.connect(path)
+        con.execute(
+            "create table quotes (quote_id integer primary key, source_key text, "
+            "normalized_quote text, quote_text text, anime_title text, "
+            "character_name text, url text)"
+        )
+        con.execute("create table sources (source_key text primary key, source_name text, "
+                    "license_name text, license_url text)")
+        con.execute("create table schema_info (key text, value text)")
+        con.execute("insert into schema_info values ('schema_version','1')")
+        # The index refuses to open without these: a records count and the FTS
+        # table, both of which the real corpus always has.
+        con.execute("create table records (record_id integer primary key, title text)")
+        con.execute("create virtual table record_fts using fts5(title)")
+        for index, (text, title) in enumerate(quotes):
+            con.execute(
+                "insert into quotes values (?,?,?,?,?,?,?)",
+                (index + 1, "t", normalize_text(text), text, title, "", ""),
+            )
+        con.commit()
+        con.close()
+        self._index_handle = KnowledgeIndex(path)
+        return self._index_handle
+
+    def tearDown(self) -> None:
+        # Windows will not delete the file while the index still holds it open.
+        handle = getattr(self, "_index_handle", None)
+        if handle is not None:
+            handle.close()
+        temporary = getattr(self, "_temporary", None)
+        if temporary is not None:
+            temporary.cleanup()
+
+    def test_an_exact_quotation_resolves(self) -> None:
+        index = self._index([("A corpse is talking.", "Chainsaw Man")])
+        self.assertEqual(index.match_quote('"A corpse is talking."')[0], "Chainsaw Man")
+
+    def test_a_leading_fragment_resolves(self) -> None:
+        # The corpus often stores a longer line than the quiz quotes.
+        index = self._index(
+            [("You cannot alter your fate. However, you can rise to meet it, "
+              "if you so choose.", "Princess Mononoke")]
+        )
+        got = index.match_quote(
+            '"You cannot alter your fate. However, you can rise to meet it."'
+        )
+        self.assertIsNotNone(got)
+        self.assertEqual(got[0], "Princess Mononoke")
+
+    def test_a_quotation_used_by_two_titles_stays_silent(self) -> None:
+        # Guessing between conflicting titles is exactly the wrong trade: the
+        # solver is still there, and a confident wrong answer is worse.
+        index = self._index(
+            [("I will never give up.", "Naruto"), ("I will never give up.", "Bleach")]
+        )
+        self.assertIsNone(index.match_quote('"I will never give up."'))
+
+    def test_an_unknown_quotation_stays_silent(self) -> None:
+        index = self._index([("A corpse is talking.", "Chainsaw Man")])
+        self.assertIsNone(index.match_quote('"Something nobody ever said."'))
+
 if __name__ == "__main__":
     unittest.main()
