@@ -1721,6 +1721,11 @@ class AnimeTriviaAutomation:
         except Exception:
             LOGGER.debug("Discord semantic clue read failed", exc_info=True)
             return None
+        skip_history = False
+        if accessible is None and not self._config.typing.press_enter:
+            # Rehearsal only: a painted card has no accessibility tree, so the
+            # practice tool supplies the clue Discord would have exposed.
+            accessible, skip_history = self._rehearsal_clue(observation)
         if (
             accessible is None
             or accessible.question_label != observation.question_label
@@ -1728,6 +1733,8 @@ class AnimeTriviaAutomation:
         ):
             return None
         self._accessible_round = (observation.signature, accessible.clue)
+        if skip_history:
+            return None
         hit = self._cache.match_history(
             accessible.clue,
             observation.expected_answer_type,
@@ -1735,6 +1742,35 @@ class AnimeTriviaAutomation:
         if hit is not None:
             LOGGER.info("Authoritative Discord clue hit: %r", accessible.clue)
         return hit
+
+    def _rehearsal_clue(self, observation: PromptObservation) -> tuple[Any, bool]:
+        """Clue injected by scripts/rehearse_batch.py for a painted card."""
+
+        path = self._config.runtime.status_path.parent / "rehearsal_clue.json"
+        try:
+            if not path.exists():
+                return None, False
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None, False
+        from .discord import AccessibleQuestion
+
+        if (
+            payload.get("question_label") != observation.question_label
+            or payload.get("expected_answer_type") != observation.expected_answer_type
+            or not payload.get("clue")
+        ):
+            return None, False
+        LOGGER.info("Rehearsal clue injected for %s: %r", observation.question_label, payload["clue"])
+        return (
+            AccessibleQuestion(
+                clue=str(payload["clue"]),
+                expected_answer_type=str(payload["expected_answer_type"]),
+                question_label=str(payload["question_label"]),
+                screen_bottom=0,
+            ),
+            bool(payload.get("force_novel", False)),
+        )
 
     def _reveal_records(
         self, spans: tuple[Any, ...]

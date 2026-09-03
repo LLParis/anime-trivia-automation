@@ -30,7 +30,9 @@ from anime_trivia_automation.config import load_config  # noqa: E402
 from anime_trivia_automation.utils import normalize_question  # noqa: E402
 from rehearse_live import compose, recolor_accent_to_green  # noqa: E402
 
-REHEARSAL_LINE = re.compile(r"^(\d\d:\d\d:\d\d\.\d\d\d) WARNING .*REHEARSAL: '(.+?)' is typed and verified")
+REHEARSAL_LINE = re.compile(
+    r"^(\d\d:\d\d:\d\d\.\d\d\d) WARNING .*REHEARSAL: (?:'(.+?)'|\"(.+?)\") is typed and verified"
+)
 
 
 def newest_log(log_dir: Path) -> Path:
@@ -42,7 +44,7 @@ def typed_answers(log_path: Path) -> list[tuple[str, str]]:
     for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
         m = REHEARSAL_LINE.match(line)
         if m:
-            out.append((m.group(1), m.group(2)))
+            out.append((m.group(1), m.group(2) or m.group(3) or ""))
     return out
 
 
@@ -68,6 +70,11 @@ def main() -> int:
     parser.add_argument("--green-max", type=float, default=12.0)
     parser.add_argument("--blank", type=float, default=2.0)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--force-novel",
+        action="store_true",
+        help="skip the history lookup so the live solver is exercised on every card",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -84,6 +91,16 @@ def main() -> int:
         cards = cards[: args.limit]
     log_path = newest_log(config.runtime.log_dir or Path("runtime/logs"))
     print(f"{len(cards)} cards | app log {log_path.name}", flush=True)
+    # Emoji clues live in Discord's accessibility tree, which a painted card
+    # lacks; recover each card's clue from the reviewed history by its answer.
+    history = json.loads(config.runtime.history_path.read_text(encoding="utf-8"))["pairs"]
+    clue_by_answer: dict[tuple[str, str], str] = {}
+    for pair in history:
+        key = (normalize_question(pair["answer"]), pair["type"])
+        prose = sum(ch.isalpha() for ch in pair["clue"]) >= 3
+        if key not in clue_by_answer or not prose:
+            clue_by_answer[key] = pair["clue"]
+    clue_file = config.runtime.status_path.parent / "rehearsal_clue.json"
 
     try:
         import ctypes
@@ -108,6 +125,24 @@ def main() -> int:
         red = ImageTk.PhotoImage(compose((width, height), image, (24, y)))
         green = ImageTk.PhotoImage(compose((width, height), recolor_accent_to_green(image), (24, y)))
         seen_before = len(typed_answers(log_path))
+        clue = card.get("hint") if card.get("kind") == "text" else clue_by_answer.get(
+            (normalize_question(card["answer"]), card.get("type") or "")
+        )
+        if clue:
+            clue_file.write_text(
+                json.dumps(
+                    {
+                        "question_label": card.get("question"),
+                        "expected_answer_type": card.get("type"),
+                        "clue": clue,
+                        "force_novel": bool(args.force_novel),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        elif clue_file.exists():
+            clue_file.unlink()
         label.configure(image=red)
         root.update()
         time.sleep(args.red)
@@ -134,6 +169,8 @@ def main() -> int:
               f"{'%.2fs' % latency if latency else ''} | {card.get('hint','')[:50]}", flush=True)
         label.configure(image=blank)
         root.update()
+        if clue_file.exists():
+            clue_file.unlink()
         time.sleep(args.blank)
     root.destroy()
     ok = sum(1 for r in results if r["ok"])
