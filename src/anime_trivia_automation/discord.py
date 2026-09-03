@@ -250,6 +250,8 @@ class DiscordQuestionLocator(DiscordComposerLocator):
         clue = head[status.end():] if status is not None else head
         clue = clue.replace("🎯", " ").strip(" ,\u2014-\t\r\n")
         if not clue:
+            clue = cls.emoji_sequence(head)
+        if not clue:
             return None
         return clue, expected_type, question_label
 
