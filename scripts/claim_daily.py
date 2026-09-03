@@ -203,6 +203,18 @@ def main() -> int:
         help="spread the claim over this many minutes past --after",
     )
     parser.add_argument(
+        "--also",
+        action="append",
+        default=[],
+        metavar="COMMAND",
+        help=(
+            "send another claim in the same trip, e.g. --also tdaily. Tatsu's "
+            "daily resets at 00:00 UTC, the same moment as Anime Soul's 17:00 "
+            "local reset, so one visit catches both. It pays credits rather than "
+            "AS Points, so it buys nothing in the store."
+        ),
+    )
+    parser.add_argument(
         "--before-reset",
         action="store_true",
         help="allow sending before the 17:00 reset (normally refused)",
@@ -282,7 +294,8 @@ def main() -> int:
 
     before = newest_messages(locator, target)
     if args.dry_run:
-        print(f"dry run: would send {COMMAND!r}. Nothing sent.")
+        planned = ", ".join(repr(c) for c in [COMMAND, *args.also])
+        print(f"dry run: would send {planned}. Nothing sent.")
         return 0
 
     if not guard.activate(target.hwnd):
@@ -293,29 +306,41 @@ def main() -> int:
         composer.set_focus()
         time.sleep(0.15)
 
-    BatchedWindowsInput().send_text(COMMAND)
-    deadline = time.monotonic() + max(1.0, config.typing.composer_settle_timeout_seconds)
-    while composer.value() != COMMAND and time.monotonic() < deadline:
-        time.sleep(0.02)
-    if composer.value() != COMMAND:
-        print(
-            f"composer holds {composer.value()[:40]!r}, not the command; nothing sent",
-            file=sys.stderr,
+    def send(command: str) -> bool:
+        """Type one command, verify it landed, press Enter, verify it cleared."""
+
+        if composer.value():
+            print(f"composer is not empty; {command!r} not sent", file=sys.stderr)
+            return False
+        BatchedWindowsInput().send_text(command)
+        settle = time.monotonic() + max(
+            1.0, config.typing.composer_settle_timeout_seconds
         )
+        while composer.value() != command and time.monotonic() < settle:
+            time.sleep(0.02)
+        if composer.value() != command:
+            print(
+                f"composer holds {composer.value()[:40]!r}, not {command!r}; "
+                "nothing sent",
+                file=sys.stderr,
+            )
+            return False
+        from pynput.keyboard import Controller, Key
+
+        controller = Controller()
+        controller.press(Key.enter)
+        controller.release(Key.enter)
+        print(f"sent {command}")
+        cleared = time.monotonic() + 3.0
+        while composer.value() != "" and time.monotonic() < cleared:
+            time.sleep(0.05)
+        if composer.value() != "":
+            print("warning: the composer did not clear; check Discord", file=sys.stderr)
+            return False
+        return True
+
+    if not send(COMMAND):
         return 2
-
-    from pynput.keyboard import Controller, Key
-
-    controller = Controller()
-    controller.press(Key.enter)
-    controller.release(Key.enter)
-    print(f"sent {COMMAND}")
-
-    deadline = time.monotonic() + 3.0
-    while composer.value() != "" and time.monotonic() < deadline:
-        time.sleep(0.05)
-    if composer.value() != "":
-        print("warning: the composer did not clear; check Discord", file=sys.stderr)
 
     for _ in range(12):
         time.sleep(0.6)
@@ -325,6 +350,10 @@ def main() -> int:
             break
     else:
         print("no reply matched; check #bots yourself")
+
+    for extra in args.also:
+        time.sleep(1.5)
+        send(extra.strip())
 
     # Put the channel back, so the quiz automation is never left looking at the
     # wrong one.
