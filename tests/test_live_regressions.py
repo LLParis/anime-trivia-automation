@@ -2050,5 +2050,53 @@ class QuizAnswerFormTests(unittest.TestCase):
 
         self.assertEqual(quiz_answer_form("Chainsaw Man", self.KNOWN), "Chainsaw Man")
 
+
+class ShortCharacterNameTests(unittest.TestCase):
+    """A character round should be answered the way a person answers it.
+
+    The operator has observed the bot accept either name: for Yuji Itadori both
+    "yuji" and "itadori" are taken. That matches the rest of the evidence, where
+    a form contained in the answer passes ("digimon" for Digimon Adventure) and
+    a longer one with extra words is refused. Answering "diana cavendish" in
+    full on 2026-09-03 drew "no way you get entire name" from the room.
+    """
+
+    def test_either_name_is_offered_for_a_two_part_name(self) -> None:
+        from anime_trivia_automation.app import AnimeTriviaAutomation as App
+
+        self.assertEqual(
+            App._short_answer_form("Yuji Itadori", "character", pick="first"), "Yuji"
+        )
+        self.assertEqual(
+            App._short_answer_form("Yuji Itadori", "character", pick="last"), "Itadori"
+        )
+
+    def test_both_ends_actually_come_up(self) -> None:
+        from anime_trivia_automation.app import AnimeTriviaAutomation as App
+
+        seen = {
+            App._short_answer_form("Diana Cavendish", "character") for _ in range(200)
+        }
+        # Always picking the same end would itself be a signature.
+        self.assertEqual(seen, {"Diana", "Cavendish"})
+
+    def test_a_single_name_and_any_title_are_left_alone(self) -> None:
+        from anime_trivia_automation.app import AnimeTriviaAutomation as App
+
+        self.assertIsNone(App._short_answer_form("Kiki", "character"))
+        self.assertIsNone(App._short_answer_form("Mello", "character"))
+        # No evidence yet about which title fragments the bot accepts, and a
+        # wrong guess would cost the fast slot on a winnable round.
+        self.assertIsNone(
+            App._short_answer_form(
+                "Re Zero Starting Life in Another World", "anime_title"
+            )
+        )
+
+    def test_initials_are_not_treated_as_a_name(self) -> None:
+        from anime_trivia_automation.app import AnimeTriviaAutomation as App
+
+        self.assertIsNone(App._short_answer_form("L Lawliet", "character"))
+
 if __name__ == "__main__":
     unittest.main()

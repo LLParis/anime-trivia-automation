@@ -244,7 +244,18 @@ def main() -> int:
                 break
             time.sleep(0.05)
         expected = card["answer"]
-        ok = typed is not None and normalize_question(typed) == normalize_question(expected)
+        # A character round is answered with one name on purpose: the bot takes
+        # either end ("yuji" or "itadori"), and the full name reads as a tell.
+        expected_parts = {
+            normalize_question(part)
+            for part in expected.split()
+            if len(part) >= 3
+        }
+        typed_norm = normalize_question(typed) if typed else ""
+        ok = bool(typed) and (
+            typed_norm == normalize_question(expected)
+            or (card.get("type") == "character" and typed_norm in expected_parts)
+        )
         results.append({"file": card["file"], "question": card.get("question"), "kind": card.get("kind"),
                         "expected": expected, "typed": typed, "latency_s": round(latency, 2) if latency else None, "ok": ok})
         mark = "OK " if ok else ("TYPO" if typed else "NONE")

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import queue
+import random
 import re
 import threading
 import time
@@ -1366,6 +1367,36 @@ class AnimeTriviaAutomation:
             state.candidate = state.guesses[0]
         return added
 
+    @staticmethod
+    def _short_answer_form(
+        answer: str, answer_type: str, *, pick: str | None = None
+    ) -> str | None:
+        """A believable single name for a character, or None to leave it alone.
+
+        The operator has observed the bot accept either name: for Yuji Itadori
+        both "yuji" and "itadori" are taken. That matches the rest of the
+        evidence, where a form contained in the answer passes ("digimon" for
+        Digimon Adventure) and a longer one with extra words is refused.
+
+        Which end is used alternates at random, because always choosing the same
+        one is its own signature, and a room of people says both. The full name
+        still follows as the next guess, so a refusal costs nothing.
+
+        Titles are left alone. There is no evidence yet about which title
+        fragments the bot accepts, and a wrong guess would cost the fast slot on
+        a round we would otherwise take.
+        """
+
+        if answer_type != "character":
+            return None
+        parts = [part.strip(",.:;’'\"") for part in answer.split()]
+        parts = [part for part in parts if len(part) >= 3]
+        if len(answer.split()) < 2 or len(parts) < 2:
+            return None
+        if pick is None:
+            pick = "first" if random.random() < 0.5 else "last"
+        return parts[0] if pick == "first" else parts[-1]
+
     def _canonical_answer_form(self, answer: str, answer_type: str) -> str:
         """Spell the answer the way the bot spells it.
 
@@ -1628,8 +1659,16 @@ class AnimeTriviaAutomation:
             "vlm": provider_ms,
             "novel": provider_ms if source == "qwen38-retrieval-consensus" else 0.0,
         }
+        # Every answer reaches Discord through here, cache hits included, so the
+        # believable short form belongs at this one point rather than in the
+        # solver path alone.
+        short = (
+            self._short_answer_form(answer, observation.expected_answer_type)
+            if guess_index == 1
+            else None
+        )
         task = AnswerTask(
-            answer=answer,
+            answer=short if short is not None else answer,
             prompt_signature=round_token,
             expected_answer_type=observation.expected_answer_type,
             question_label=observation.question_label,
@@ -1642,11 +1681,27 @@ class AnimeTriviaAutomation:
             guess_index=guess_index,
         )
         queued = self._dispatcher.submit(task)
+        if queued and guess_index == 1 and short is not None:
+            # Hold the full name behind it. If a single name is ever refused,
+            # the round is still ours 5 s later rather than lost.
+            self._queue_answer_if_current(
+                answer=answer,
+                source=source,
+                observation=observation,
+                clue_fingerprint=clue_fingerprint,
+                round_token=round_token,
+                detected_at=detected_at,
+                ocr_ms=ocr_ms,
+                extract_ms=extract_ms,
+                lookup_ms=lookup_ms,
+                provider_ms=provider_ms,
+                guess_index=2,
+            )
         if queued:
             LOGGER.info(
                 "Answer queued (guess %d): %s (processing %.1fms, provider %.1fms)",
                 guess_index,
-                answer,
+                task.answer,
                 ocr_ms + extract_ms + lookup_ms,
                 provider_ms,
             )
