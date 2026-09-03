@@ -103,6 +103,96 @@ def require_rehearsal_worker(
     return run_id
 
 
+# Sampled from a real Anime Soul card (Screenshot 2026-08-31 070005.png): the
+# embed sits at x=47 behind a 6 px accent strip, on a #1A1827 body.
+CARD_SIZE = (967, 288)
+CARD_OUTER = (13, 10, 31)
+CARD_BODY = (26, 24, 39)
+ACCENT_X = 47
+ACCENT_WIDTH = 6
+ACCENT_RED = (237, 66, 69)
+ACCENT_GREEN = (59, 165, 93)
+CARD_FONT = "C:/Windows/Fonts/segoeui.ttf"
+
+
+def render_card(
+    clue: str,
+    *,
+    question_label: str = "1/10",
+    answer_type: str = "anime_title",
+    ready: bool = False,
+) -> Image.Image:
+    """Draw a card carrying an arbitrary clue, for rehearsing a specific round.
+
+    Painting a saved screenshot cannot rehearse a chosen text clue: the app
+    reads the clue out of the pixels, so the screenshot's own clue wins and the
+    injected one is never consulted. This draws the real card layout with the
+    wanted text instead, including every marker the OCR keys on -- the header,
+    the "Answer with the ..." line, the question label, the status words, and
+    the coloured accent strip that is the authoritative red/green signal.
+
+    Deliberately free of emoji glyphs: the markers are plain text, and a font
+    fallback box would only risk confusing the OCR.
+    """
+
+    from PIL import ImageDraw, ImageFont
+
+    width, height = CARD_SIZE
+    image = Image.new("RGB", (width, height), CARD_OUTER)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([ACCENT_X + ACCENT_WIDTH, 8, width - 8, height - 8], fill=CARD_BODY)
+    draw.rectangle(
+        [ACCENT_X, 8, ACCENT_X + ACCENT_WIDTH - 1, height - 8],
+        fill=ACCENT_GREEN if ready else ACCENT_RED,
+    )
+
+    def font(size: int):
+        try:
+            return ImageFont.truetype(CARD_FONT, size)
+        except OSError:
+            return ImageFont.load_default()
+
+    left = ACCENT_X + ACCENT_WIDTH + 22
+    status = "Answer Now!" if ready else "Get Ready..."
+    draw.text((left, 18), f"Anime Guessing Game - {status}", font=font(21), fill=(220, 221, 222))
+
+    # Wrap the clue by measured width rather than a character count, so a long
+    # quotation lays out the way a real card does.
+    body = font(29)
+    words, lines, current = clue.split(), [], ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if draw.textlength(candidate, font=body) > width - left - 30 and current:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    for index, line in enumerate(lines[:4]):
+        draw.text((left, 62 + index * 38), line, font=body, fill=(255, 255, 255))
+
+    kind = "anime title" if answer_type == "anime_title" else "character name"
+    draw.text(
+        (left, 214),
+        f"Answer with the {kind} - first correct guess in chat wins!",
+        font=font(20),
+        fill=(220, 221, 222),
+    )
+    footer = (
+        "answers OPEN you have 60s"
+        if ready
+        else "Reading time - answers open in 5s"
+    )
+    draw.text(
+        (left, 250),
+        f"Question {question_label} - {footer}",
+        font=font(18),
+        fill=(148, 155, 164),
+    )
+    return image
+
+
 def recolor_accent_to_green(card: Image.Image, accent_width: int = 60) -> Image.Image:
     """Turn the card's red left accent (and the red status dot) green."""
 

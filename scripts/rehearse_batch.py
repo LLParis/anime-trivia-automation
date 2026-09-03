@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rehearse_live import (
     compose,
     recolor_accent_to_green,
+    render_card,
     require_rehearsal_worker,
 )
 
@@ -133,6 +134,9 @@ def main() -> int:
             used[kind] += 1
             cards.append(
                 {
+                    # A text clue is read out of the pixels, so a saved
+                    # screenshot's own clue would win. Render the wanted one.
+                    "render": kind == "text",
                     "file": source["file"],
                     "kind": kind,
                     "answer": case["answer"],
@@ -184,7 +188,14 @@ def main() -> int:
             expected_run_id=rehearsal_run_id,
             max_age_seconds=config.status.stale_after_seconds,
         )
-        image = Image.open(Path(args.screens) / card["file"])
+        if card.get("render"):
+            image = render_card(
+                card["hint"],
+                question_label=card.get("question") or "1/10",
+                answer_type=card.get("type") or "anime_title",
+            )
+        else:
+            image = Image.open(Path(args.screens) / card["file"])
         y = max(0, height - image.height - 240)
         red = ImageTk.PhotoImage(compose((width, height), image, (24, y)))
         green = ImageTk.PhotoImage(compose((width, height), recolor_accent_to_green(image), (24, y)))
