@@ -18,6 +18,7 @@ from .discord import DiscordComposer, DiscordComposerLocator
 from .models import AnswerTask
 from .status import NullStatus, OperatorStatus
 from .utils import normalize_question, sanitize_answer
+from .windows_input import BatchedWindowsInput
 
 LOGGER = logging.getLogger(__name__)
 
@@ -501,6 +502,11 @@ class SafeKeyboardExecutor:
         # Foreground window we displaced to reach Discord for the current
         # task; restored after Enter so manual research can continue.
         self._activated_from: int | None = None
+        # Exact text this executor last placed in the composer. If it is still
+        # there when the next round starts (Enter not honoured), it is ours to
+        # clear, not a human draft.
+        self._last_owned_answer: str | None = None
+        self._text_input = BatchedWindowsInput()
 
     @staticmethod
     def _suppression_key(task: AnswerTask) -> str:
@@ -572,7 +578,16 @@ class SafeKeyboardExecutor:
         composer = self._composer_locator.find(window.hwnd, window.process_id)
         if composer is None:
             return None, False
-        if composer.value() != "":
+        current_value = composer.value()
+        if current_value != "" and self._is_owned_leftover(current_value):
+            LOGGER.warning(
+                "Composer still holds the previous automation answer %r; clearing it",
+                current_value,
+            )
+            if not self._keystroke_clear(composer, current_value):
+                return None, True
+            current_value = composer.value()
+        if current_value != "":
             LOGGER.warning("Typing skipped: Discord composer is not empty")
             return None, True
         if not composer.focused() and self._config.auto_focus_composer:
@@ -618,6 +633,9 @@ class SafeKeyboardExecutor:
                     "Composer diverged from the macro-owned draft; no user text was erased"
                 )
                 return False
+            if self._keystroke_clear(composer, expected_prefix):
+                LOGGER.info("Cleared exact macro-owned draft after cancellation")
+                return True
             composer.clear_owned_value()
             current_value = self._wait_for_composer_value(
                 composer,
@@ -633,6 +651,35 @@ class SafeKeyboardExecutor:
             LOGGER.exception("Could not safely clear the macro-owned draft")
             return False
 
+    def _is_owned_leftover(self, value: str) -> bool:
+        return bool(self._last_owned_answer) and value == self._last_owned_answer
+
+    def _keystroke_clear(self, composer: DiscordComposer, expected: str) -> bool:
+        """Select-all + Backspace inside the focused composer holding our text.
+
+        Discord's Slate editor only trusts real input; a ValuePattern write can
+        leave the visible editor and Slate's model disagreeing. Select-all is
+        scoped to the focused editor, so only our own exact text can be erased.
+        """
+
+        try:
+            if not composer.focused() or composer.value() != expected:
+                return False
+            from pynput.keyboard import Key
+
+            with self._controller.pressed(Key.ctrl):
+                self._controller.press("a")
+                self._controller.release("a")
+            self._controller.press(Key.backspace)
+            self._controller.release(Key.backspace)
+            cleared = self._wait_for_composer_value(
+                composer, expected="", transitional_values={expected}
+            )
+            return cleared == ""
+        except Exception:
+            LOGGER.warning("Keystroke clear failed", exc_info=True)
+            return False
+
     def _clear_or_remember(
         self, composer: DiscordComposer | None, expected_prefix: str
     ) -> None:
@@ -644,6 +691,14 @@ class SafeKeyboardExecutor:
                 pass
         if not self._clear_owned_draft(composer, expected_prefix):
             self._remember_orphan(expected_prefix)
+
+    def _wait_for_clear(self, composer: DiscordComposer, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if composer.value() == "":
+                return True
+            time.sleep(0.01)
+        return composer.value() == ""
 
     def _wait_for_composer_value(
         self,
@@ -910,9 +965,117 @@ class SafeKeyboardExecutor:
         window: ForegroundWindow,
         composer: DiscordComposer | None,
     ) -> str:
-        """Atomically place the complete answer while the exact prompt is green."""
+        """Place the complete answer in the composer while the exact prompt is green.
 
+        ``typing.composer_write_mode = "type"`` sends real keystrokes, which is
+        the only writer Discord's Slate editor honours consistently (the UI
+        Automation ValuePattern write left text that Enter did not send on
+        2026-09-02 18:00, Q3 and Q7). ``"uia"`` keeps that writer available.
+        """
+
+        if self._config.composer_write_mode == "type":
+            return self._type_complete_answer(task, answer, window, composer)
         return self._set_complete_answer(task, answer, window, composer)
+
+    def _type_complete_answer(
+        self,
+        task: AnswerTask,
+        answer: str,
+        window: ForegroundWindow,
+        composer: DiscordComposer | None,
+    ) -> str:
+        """Type the complete answer with real keystrokes while the card is green.
+
+        Returns ``committed``, ``manual``, ``retry``, ``ambiguous``, or ``stale``.
+        Discord's accessibility value trails real keystrokes by up to several
+        hundred milliseconds, so the draft is verified once at the end with a
+        settle window, never per character (per-character checks stranded a
+        one-letter prefix in every noon round on 2026-09-02).
+        """
+
+        def prompt_live() -> bool:
+            if self._readiness_config.require_green_outline:
+                return self._active_prompt.is_ready(
+                    task.prompt_signature, task.clue_fingerprint
+                )
+            return self._active_prompt.is_open(
+                task.prompt_signature, task.clue_fingerprint
+            )
+
+        if not prompt_live():
+            return "stale"
+        current_window = self._guard.current()
+        allowed, reason = self._guard.validate(current_window)
+        if not allowed or current_window is None or current_window.hwnd != window.hwnd:
+            LOGGER.info("Keystroke commit deferred: %s", reason)
+            return "retry"
+        if composer is None:
+            LOGGER.warning("Keystroke commit requires a verified Discord composer")
+            return "ambiguous"
+        try:
+            if composer.value() != "":
+                return "manual"
+            if not composer.focused():
+                return "retry"
+        except Exception:
+            LOGGER.debug("Discord composer rerendered before typing", exc_info=True)
+            return "retry"
+
+        # One SendInput batch of Unicode key events: real input, which Slate
+        # always accepts, delivered in a few milliseconds with no per-character
+        # Python round trips.
+        try:
+            self._text_input.send_text(answer)
+        except Exception:
+            LOGGER.warning("Text injection outcome is ambiguous", exc_info=True)
+            self._remember_orphan(answer)
+            return "ambiguous"
+        self._last_owned_answer = answer
+
+        # One settle window for the lagging accessibility value.
+        deadline = time.monotonic() + max(
+            0.8, float(self._config.composer_settle_timeout_seconds)
+        )
+        final_value = ""
+        while True:
+            try:
+                final_value = composer.value()
+            except Exception:
+                LOGGER.warning("Could not read the composer after typing", exc_info=True)
+                self._remember_orphan(answer)
+                return "ambiguous"
+            if final_value == answer:
+                return "committed"
+            if final_value and not answer.startswith(final_value):
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        if final_value.startswith(answer) and final_value != answer:
+            LOGGER.warning("Composer contains more than the owned answer; not sending")
+            return "manual"
+        if final_value and answer.startswith(final_value):
+            # Keys were dropped or the value is still trailing; finish the
+            # suffix once and re-verify before giving up on the round.
+            missing = answer[len(final_value):]
+            LOGGER.info("Composer shows a %d-character prefix; typing the rest", len(final_value))
+            try:
+                self._text_input.send_text(missing)
+            except Exception:
+                self._remember_orphan(answer)
+                return "ambiguous"
+            settled = self._wait_for_composer_value(
+                composer, expected=answer, transitional_values={final_value}
+            )
+            if settled == answer:
+                return "committed"
+            self._clear_or_remember(composer, settled)
+            return "ambiguous"
+        if final_value == "":
+            LOGGER.warning("Keystrokes did not reach the composer; nothing to send")
+            return "retry"
+        LOGGER.warning("Composer holds unexpected text after typing; not sending")
+        return "manual"
 
     def _set_complete_answer(
         self,
@@ -1227,10 +1390,19 @@ class SafeKeyboardExecutor:
         )
         if composer is not None:
             try:
-                deadline = time.monotonic() + 0.35
-                while time.monotonic() < deadline and composer.value() != "":
-                    time.sleep(0.01)
-                cleared = composer.value() == ""
+                cleared = self._wait_for_clear(composer, 1.0)
+                if not cleared and composer.value() == answer:
+                    # Enter can land while Slate is still digesting the last
+                    # keystrokes; one more Enter is safe because the text is
+                    # still ours and nothing has been sent yet.
+                    LOGGER.warning("Composer did not clear after Enter; pressing Enter once more")
+                    self._controller.press(self._enter_key)
+                    self._controller.release(self._enter_key)
+                    cleared = self._wait_for_clear(composer, 1.0)
+                if not cleared and composer.value() == answer:
+                    # Leave nothing behind: a stuck answer blocked Q4, Q5, and
+                    # Q9 on 2026-09-02 18:00 as "manual text".
+                    self._keystroke_clear(composer, answer)
             except Exception:
                 self._remember_orphan(answer)
                 self._restore_foreground()
@@ -1253,7 +1425,7 @@ class SafeKeyboardExecutor:
                 self._clear_or_remember(composer, answer)
                 self._restore_foreground()
                 LOGGER.warning(
-                    "Enter was sent but Discord did not clear within 350ms; "
+                    "Enter was sent but Discord did not clear within 2 s; "
                     "suppressing any duplicate submission"
                 )
                 self._status.emit(

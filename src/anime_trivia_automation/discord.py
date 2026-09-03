@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -177,14 +178,14 @@ class DiscordQuestionLocator(DiscordComposerLocator):
             name = str(element.CurrentName or "")
             if "Anime Guessing Game" not in name:
                 continue
-            match = self._CARD_PATTERN.search(name)
-            if match is None:
+            card = self.parse_card_name(name)
+            if card is None:
+                LOGGER.warning(
+                    "Anime Soul card did not parse; accessible name was %r",
+                    name[:400],
+                )
                 continue
-            expected_type = (
-                "anime_title"
-                if match.group(2).casefold() == "anime title"
-                else "character"
-            )
+            clue, expected_type, question_label = card
             try:
                 rectangle = element.CurrentBoundingRectangle
                 screen_top = int(rectangle.top)
@@ -197,14 +198,77 @@ class DiscordQuestionLocator(DiscordComposerLocator):
                     screen_top,
                     index,
                     AccessibleQuestion(
-                    clue=match.group(1).strip(),
-                    expected_answer_type=expected_type,
-                    question_label=f"{match.group(3)}/{match.group(4)}",
-                    screen_bottom=screen_bottom,
+                        clue=clue,
+                        expected_answer_type=expected_type,
+                        question_label=question_label,
+                        screen_bottom=screen_bottom,
                     ),
                 )
             )
         return max(parsed, key=lambda item: (item[0], item[1]))[2] if parsed else None
+
+    _QUESTION_LABEL = re.compile(r"Question\s*(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+    _ANSWER_TYPE = re.compile(
+        r"Answer with the\s+(anime title|character name)", re.IGNORECASE
+    )
+    _STATUS_WORDS = re.compile(
+        r"(?:Get Ready(?:\.\.\.|…)?|Answer Now!?|Round Over)", re.IGNORECASE
+    )
+    # Card chrome that must never be mistaken for the clue itself.
+    _CHROME_EMOJI = frozenset("🎮🔴🟢⚪🎯🔒🔓⏳⌛🕐🕑🕒⏱️⏰✅❌")
+
+    @classmethod
+    def parse_card_name(cls, name: str) -> tuple[str, str, str] | None:
+        """Extract (clue, answer type, question label) from a card's accessible name.
+
+        The strict regex is tried first. If Discord renders the card slightly
+        differently (missing 🎯, extra separators, emoji exposed as separate
+        runs), fall back to structural parsing: the clue is what sits between
+        the status word and the "Answer with the ..." instruction, and for an
+        emoji rebus it is the emoji sequence itself.
+        """
+
+        match = cls._CARD_PATTERN.search(name)
+        if match is not None:
+            return (
+                match.group(1).strip(),
+                "anime_title" if match.group(2).casefold() == "anime title" else "character",
+                f"{match.group(3)}/{match.group(4)}",
+            )
+        type_match = cls._ANSWER_TYPE.search(name)
+        label_match = cls._QUESTION_LABEL.search(name)
+        if type_match is None or label_match is None:
+            return None
+        expected_type = (
+            "anime_title" if type_match.group(1).casefold() == "anime title" else "character"
+        )
+        question_label = f"{label_match.group(1)}/{label_match.group(2)}"
+        head = name[: type_match.start()]
+        status = None
+        for status in cls._STATUS_WORDS.finditer(head):
+            pass
+        clue = head[status.end():] if status is not None else head
+        clue = clue.replace("🎯", " ").strip(" ,\u2014-\t\r\n")
+        if not clue:
+            return None
+        return clue, expected_type, question_label
+
+    @staticmethod
+    def emoji_sequence(text: str) -> str:
+        """The emoji glyphs of a clue in order, without Discord's card chrome."""
+
+        symbols: list[str] = []
+        for character in text:
+            if character in ("️", "‍"):
+                if symbols:
+                    symbols[-1] += character
+                continue
+            category = unicodedata.category(character)
+            if category.startswith("S") or ord(character) > 0xFFFF:
+                if character in DiscordQuestionLocator._CHROME_EMOJI:
+                    continue
+                symbols.append(character)
+        return " ".join(symbols)
 
     @classmethod
     def parse_reveal_answer(cls, accessible_name: str) -> str | None:

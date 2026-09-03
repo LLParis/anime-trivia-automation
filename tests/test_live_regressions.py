@@ -215,6 +215,8 @@ class FakeController:
         self.enter_key = enter_key
         self.entered = False
         self.type_calls: list[str] = []
+        self.selected_all = False
+        self._modifier_held = False
 
     def type(self, character: str) -> None:
         self.type_calls.append(character)
@@ -224,13 +226,38 @@ class FakeController:
         if key == self.enter_key:
             self.entered = True
             self.composer.text = ""
+            return
+        if key == "a" and self._modifier_held:
+            self.selected_all = True
+            return
+        if getattr(key, "name", None) == "backspace" and self.selected_all:
+            # Select-all + Backspace erases the whole (focused) editor.
+            self.composer.text = ""
+            self.selected_all = False
 
     def release(self, _key: object) -> None:
         return
 
     @contextmanager
     def pressed(self, _key: object):
-        yield
+        self._modifier_held = True
+        try:
+            yield
+        finally:
+            self._modifier_held = False
+
+
+class FakeTextInput:
+    """Stands in for the SendInput batch writer: text lands in the composer."""
+
+    def __init__(self, composer: FakeComposer) -> None:
+        self.composer = composer
+        self.sent: list[str] = []
+
+    def send_text(self, text: str) -> int:
+        self.sent.append(text)
+        self.composer.text += text
+        return len(text) * 2
 
 
 class AmbiguousEnterController(FakeController):
@@ -264,7 +291,7 @@ def make_executor(
     active: ActivePromptState,
     composer: FakeComposer,
     *,
-    write_mode: str = "uia",
+    write_mode: str = "type",
     auto_activate: bool = True,
 ) -> SafeKeyboardExecutor:
     executor = SafeKeyboardExecutor.__new__(SafeKeyboardExecutor)
@@ -300,6 +327,8 @@ def make_executor(
     executor._suppressed_rounds = set()
     executor._status = NullStatus()
     executor._controller = FakeController(composer, executor._enter_key)
+    executor._text_input = FakeTextInput(composer)
+    executor._last_owned_answer = None
     return executor
 
 
@@ -1132,7 +1161,7 @@ class LiveRegressionTests(unittest.TestCase):
         signature = "round:character:2/10"
         active.update(signature, "locked", 1)
         composer = FakeComposer()
-        executor = make_executor(active, composer)
+        executor = make_executor(active, composer, write_mode="uia")
         task = AnswerTask(
             answer="Fuu Kasumi",
             prompt_signature=signature,
@@ -1160,7 +1189,7 @@ class LiveRegressionTests(unittest.TestCase):
         signature = "round:character:2/10"
         active.update(signature, "ready", 1)
         composer = DelayedAtomicComposer()
-        executor = make_executor(active, composer)
+        executor = make_executor(active, composer, write_mode="uia")
         task = AnswerTask(
             answer="Benedict Blue",
             prompt_signature=signature,
@@ -1177,13 +1206,106 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertTrue(executor._controller.entered)
         self.assertEqual(composer.text, "")
 
-    def test_character_at_a_time_mode_is_rejected_for_live_config(self) -> None:
-        config = AppConfig(
-            capture=CaptureConfig(region=(0, 0, 1920, 1080), calibrated=True),
-            typing=TypingConfig(composer_write_mode="type"),
+    def test_only_the_two_known_composer_writers_are_accepted(self) -> None:
+        for mode in ("type", "uia"):
+            validate_config(
+                AppConfig(
+                    capture=CaptureConfig(region=(0, 0, 1920, 1080), calibrated=True),
+                    typing=TypingConfig(composer_write_mode=mode),
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "composer_write_mode"):
+            validate_config(
+                AppConfig(
+                    capture=CaptureConfig(region=(0, 0, 1920, 1080), calibrated=True),
+                    typing=TypingConfig(composer_write_mode="clipboard"),
+                )
+            )
+
+    def test_stuck_owned_answer_is_cleared_before_the_next_round(self) -> None:
+        # 2026-09-02 18:00: Q3's text stayed in the box after Enter, so Q4, Q5,
+        # and Q9 were refused as "manual text". Our own leftover is ours to clear.
+        active = ActivePromptState()
+        signature = "round:character:4/10"
+        active.update(signature, "ready", 1, "text:bleach")
+        composer = FakeComposer()
+        composer.text = "Hyoma Chigiri"
+        executor = make_executor(active, composer)
+        executor._last_owned_answer = "Hyoma Chigiri"
+        task = AnswerTask(
+            answer="Bleach",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="4/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="antigravity-account",
+            clue_fingerprint="text:bleach",
         )
-        with self.assertRaisesRegex(ValueError, "must be 'uia'"):
-            validate_config(config)
+        self.assertTrue(executor.execute(task))
+        self.assertTrue(executor._controller.entered)
+        self.assertEqual(executor._text_input.sent, ["Bleach"])
+        self.assertEqual(composer.text, "")
+
+    def test_human_text_in_the_box_is_never_cleared(self) -> None:
+        active = ActivePromptState()
+        signature = "round:character:4/10"
+        active.update(signature, "ready", 1, "text:bleach")
+        composer = FakeComposer()
+        composer.text = "my own guess"
+        executor = make_executor(active, composer)
+        executor._last_owned_answer = "Hyoma Chigiri"
+        executor._config = TypingConfig(
+            **{**executor._config.__dict__, "foreground_wait_timeout_seconds": 0.2}
+        )
+        task = AnswerTask(
+            answer="Bleach",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="4/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="antigravity-account",
+            clue_fingerprint="text:bleach",
+        )
+        self.assertFalse(executor.execute(task))
+        self.assertFalse(executor._controller.entered)
+        self.assertEqual(composer.text, "my own guess")
+
+    def test_second_enter_and_cleanup_when_discord_ignores_the_first(self) -> None:
+        active = ActivePromptState()
+        signature = "round:anime_title:7/10"
+        active.update(signature, "ready", 1, "text:steins")
+        composer = FakeComposer()
+        executor = make_executor(active, composer)
+
+        class DeafController(FakeController):
+            def __init__(self, composer, enter_key):
+                super().__init__(composer, enter_key)
+                self.enter_presses = 0
+
+            def press(self, key):
+                if key == self.enter_key:
+                    self.enter_presses += 1
+                    self.entered = True
+                    return  # Discord ignores Enter; text stays
+                super().press(key)
+
+        executor._controller = DeafController(composer, executor._enter_key)
+        task = AnswerTask(
+            answer="Steins;Gate",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="7/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="antigravity-account",
+            clue_fingerprint="text:steins",
+        )
+        self.assertTrue(executor.execute(task))
+        self.assertEqual(executor._controller.enter_presses, 2)
+        # Nothing is left behind to block the next round.
+        self.assertEqual(composer.text, "")
 
     def test_latest_only_dispatch_replaces_stale_fingerprint_variants(self) -> None:
         active = ActivePromptState()

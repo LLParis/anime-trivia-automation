@@ -328,8 +328,8 @@ class TypingConfig:
     # write. Character-at-a-time injection is intentionally not a live option:
     # Discord's Slate accessibility value can lag the visible editor and leave
     # an orphaned one-character prefix.
-    composer_write_mode: str = "uia"
-    composer_settle_timeout_seconds: float = 0.25
+    composer_write_mode: str = "type"
+    composer_settle_timeout_seconds: float = 0.8
     # When another app (Chrome/Gemini) is foreground at green, bring the one
     # Discord window forward ourselves once the operator has been input-idle
     # for this long, then hand focus back after Enter.
@@ -609,10 +609,10 @@ def load_config(path: str | Path) -> AppConfig:
         max_answer_characters=int(typing_raw.get("max_answer_characters", 96)),
         stop_key=str(typing_raw.get("stop_key", "f12")).casefold(),
         composer_write_mode=str(
-            typing_raw.get("composer_write_mode", "uia")
+            typing_raw.get("composer_write_mode", "type")
         ).casefold(),
         composer_settle_timeout_seconds=float(
-            typing_raw.get("composer_settle_timeout_seconds", 0.25)
+            typing_raw.get("composer_settle_timeout_seconds", 0.8)
         ),
         auto_activate_discord=bool(typing_raw.get("auto_activate_discord", True)),
         activation_idle_ms=int(typing_raw.get("activation_idle_ms", 350)),
@@ -1162,11 +1162,8 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("typing composer selectors cannot be empty")
     if config.typing.max_answer_characters < 1:
         raise ValueError("typing.max_answer_characters must be positive")
-    if config.typing.composer_write_mode != "uia":
-        raise ValueError(
-            "typing.composer_write_mode must be 'uia'; character-at-a-time "
-            "typing is unsafe with Discord's asynchronous Slate UIA value"
-        )
+    if config.typing.composer_write_mode not in {"type", "uia"}:
+        raise ValueError("typing.composer_write_mode must be 'type' or 'uia'")
     if not 0.05 <= config.typing.composer_settle_timeout_seconds <= 2.0:
         raise ValueError(
             "typing.composer_settle_timeout_seconds must be between 0.05 and 2.0"
