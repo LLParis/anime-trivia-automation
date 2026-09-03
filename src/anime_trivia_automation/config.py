@@ -311,7 +311,7 @@ class TypingConfig:
     enabled: bool = True
     expected_process_names: tuple[str, ...] = ("Discord.exe",)
     expected_window_title_contains: str = "Discord"
-    pre_delay_seconds: tuple[float, float] = (0.05, 0.15)
+    pre_delay_seconds: tuple[float, float] = (0.0, 0.0)
     key_delay_seconds: tuple[float, float] = (0.012, 0.028)
     draft_while_locked: bool = True
     verify_composer: bool = True
@@ -321,7 +321,7 @@ class TypingConfig:
     composer_class_fragment: str = "slateTextArea"
     respect_detected_countdown: bool = True
     fallback_answer_open_delay_seconds: float = 5.0
-    enter_after_open_slack_seconds: float = 0.06
+    enter_after_open_slack_seconds: float = 0.015
     max_answer_characters: int = 96
     stop_key: str = "f12"
     # The answer reaches Discord as one complete UI Automation ValuePattern
@@ -582,7 +582,7 @@ def load_config(path: str | Path) -> AppConfig:
         max_answer_characters=int(vlm_raw.get("max_answer_characters", 96)),
     )
 
-    pre_delay = typing_raw.get("pre_delay_seconds", [0.05, 0.15])
+    pre_delay = typing_raw.get("pre_delay_seconds", [0.0, 0.0])
     key_delay = typing_raw.get("key_delay_seconds", [0.012, 0.028])
     typing = TypingConfig(
         enabled=bool(typing_raw.get("enabled", True)),
@@ -613,7 +613,7 @@ def load_config(path: str | Path) -> AppConfig:
             typing_raw.get("fallback_answer_open_delay_seconds", 5.0)
         ),
         enter_after_open_slack_seconds=float(
-            typing_raw.get("enter_after_open_slack_seconds", 0.06)
+            typing_raw.get("enter_after_open_slack_seconds", 0.015)
         ),
         max_answer_characters=int(typing_raw.get("max_answer_characters", 96)),
         stop_key=str(typing_raw.get("stop_key", "f12")).casefold(),

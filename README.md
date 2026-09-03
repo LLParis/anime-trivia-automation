@@ -2,7 +2,7 @@
 
 Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, answers from reviewed history first, resolves new clues with account-authenticated Gemini 3.8, and sends the first confident answer as real keyboard input the moment the same card turns green.
 
-Version 0.10.3 hardens Claude's post-18:00 real-input repair for the next live run:
+Version 0.10.4 keeps the September 3 bot-confirmed live path and removes only the deliberate post-green waits that cost the Kiki race:
 
 - **Any live card is answered.** The locked-Question-1 latch is gone. It made the worker ignore every card of a quiz it joined mid-way (all of Q7–Q10 on 2026-09-02 after the launcher crashed and was restarted). Red or green cards are always the live round; only grey cards are inert.
 - **First verified answer wins; later evidence can recover.** A wrong message triggers Discord's five-second slowmode, so follow-up guesses are spaced by at least five seconds. The first grounded answer to arrive is queued immediately; later distinct grounded answers can be tried only while the same card remains green, up to `typing.max_guesses_per_round`. Identical answers are never re-sent.
@@ -20,7 +20,7 @@ DXcam 60 FPS physical-pixel crop
   -> CUDA change/stability gate
   -> PaddleOCR GPU + newest-card/readiness extraction
   -> Discord UI Automation semantic clue read (exact text/emoji)
-       -> reviewed 176-pair history (exact text + exact emoji)
+       -> reviewed 186-pair history (exact text + exact emoji)
        -> fuzzy text cache / strict pHash cache
        -> unseen semantic clue: Antigravity Gemini 3.8 Low
        -> raw image without semantics or pHash: abstain (API and local VLM off)
@@ -67,9 +67,9 @@ An accent-strip watcher samples the live card's colour band on every captured fr
 - `src/anime_trivia_automation/antigravity.py` — account-authenticated Gemini 3.8 Low CLI provider with structured output, emoji reading, environment isolation, output bounds, absolute deadlines, and owned process-tree shutdown.
 - `src/anime_trivia_automation/knowledge.py` — read-only exact-quote and FTS5 access to the local source-attributed anime index.
 - `src/anime_trivia_automation/vlm.py` — experimental in-process local VLM; live submission is disabled in config.
-- `data/trivia_history.seed.json` — 176 reviewed clue→answer pairs with per-row provenance.
-- `data/answer_catalog.seed.json` — 237 canonical answer strings used for spelling canonicalization.
-- `data/trivia_cache.seed.json` — 21 reviewed text keys and 31 reviewed pHashes; `data/trivia_cache.json` is the ignored mutable cache.
+- `data/trivia_history.seed.json` — 186 reviewed clue→answer pairs with per-row provenance.
+- `data/answer_catalog.seed.json` — 239 canonical answer strings used for spelling canonicalization.
+- `data/trivia_cache.seed.json` — 21 reviewed text keys and 42 reviewed pHashes; `data/trivia_cache.json` is the ignored mutable cache.
 - `scripts/eval_resolvers.py` — offline accuracy/latency report of a provider over the reviewed history (no Discord, no keyboard).
 - `scripts/replay_screenshots.py` — one-warmup offline replay of saved cards.
 - `scripts/build_anime_knowledge.py` — streamed, atomic index build from the private local AniList, quote, and Manami source files.
@@ -168,7 +168,7 @@ The mutable cache schema is JSON with text, pHash, and semantic maps plus per-en
 - The colored-accent prelocator keeps active-card OCR near 60–100 ms; closed grey cards fall back to the full band (400–700 ms).
 - History/cache lookups are effectively immediate.
 - Measured 2026-09-02: Antigravity answered all 11 real semantic cards it attempted correctly across the noon and 18:00 quizzes, with 3.2–5.0 s provider latency. A direct 40-clue review scored 36/40 exact first answers (37/40 when the equivalent `Mushi-Shi` spelling is counted), median 3.57 s; two emoji clues hit the 12-second deadline. Local Qwen produced only 7/20 exact first answers, so it is disabled. The Developer API evaluation was quota/runtime blocked (22 errors and two timeouts), not an intelligence result, and that API is disabled on the workstation.
-- Real Discord integration probe on 2026-09-02: complete-value acknowledgment took 16–22 ms and verified clearing took 15–17 ms across three focused round trips; no Enter was pressed. Live Green→Enter also includes the readiness OCR pass and 60 ms ownership slack.
+- September 3 Kiki evidence: the answer was ready 2.1 s before green and the complete live path took 533 ms from local accent flip to confirmed composer clear. Removing the logged 144 ms randomized pre-delay and retaining only a 15 ms one-frame Enter cushion targets roughly 344 ms while preserving two-frame accent confirmation, OCR, round/fingerprint identity, exact HWND/focus/composer ownership, full-value verification, and the final green check.
 
 ## Implementation references
 

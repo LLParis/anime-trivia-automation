@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source": "Anime Soul bot reveals, accepted-live correlations, and per-row labeled user-capture cross-checks; only rows marked bot-reveal are bot-confirmed",
-  "captured_utc": "2026-09-03T01:04:14Z",
+  "captured_utc": "2026-09-03T14:05:35Z",
   "pairs": [
     {"clue": "\"Sometimes living can be hard, but it's only because we're alive that we can make each other laugh, cry, and be happy.\"", "type": "anime_title", "answer": "Fruits Basket"},
     {"clue": "🏍️ 💊 🏙️ 💥", "type": "anime_title", "answer": "Akira"},
@@ -178,6 +178,16 @@
     {"clue": "A serious Public Safety devil hunter who fights with a sword, keeps his apartment tidy, and looks after two chaotic partners.", "type": "character", "answer": "Aki Hayakawa", "verification": "runtime-paired-bot-reveal-2026-09-02-18"},
     {"clue": "A confident blond esper who once considered himself superior to everyone else before learning humility from another psychic.", "type": "character", "answer": "Teruki Hanazawa", "verification": "runtime-paired-bot-reveal-2026-09-02-18"},
     {"clue": "\"This must be the choice of Steins Gate.\"", "type": "anime_title", "answer": "Steins Gate", "verification": "runtime-paired-bot-reveal-2026-09-02-18"},
-    {"clue": "\"You believe in aliens, but not ghosts?\"", "type": "anime_title", "answer": "Dandadan", "verification": "runtime-paired-bot-reveal-2026-09-02-18"}
+    {"clue": "\"You believe in aliens, but not ghosts?\"", "type": "anime_title", "answer": "Dandadan", "verification": "runtime-paired-bot-reveal-2026-09-02-18"},
+    {"clue": "\"A corpse is talking.\"", "type": "anime_title", "answer": "Chainsaw Man", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-03-07"},
+    {"clue": "A chocolate-loving blond orphan who takes a more aggressive path than his white-haired rival while pursuing a notorious criminal.", "type": "character", "answer": "Mello", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-03-07"},
+    {"clue": "A young witch who leaves home at thirteen, starts a flying delivery service, and is accompanied by a black cat.", "type": "character", "answer": "Kiki", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-03-07"},
+    {"clue": "🚘 🍱 ⛰️ 🌙 🏁", "type": "anime_title", "answer": "Initial D", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-03-07"},
+    {"clue": "\"I'm you.\"", "type": "anime_title", "answer": "Jujutsu Kaisen", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-03-07"},
+    {"clue": "\"You cannot alter your fate. However, you can rise to meet it.\"", "type": "anime_title", "answer": "Princess Mononoke", "verification": "bot-timeout-reveal-transcript-2026-09-03-07"},
+    {"clue": "🖌️ 🏫 🗼 🎨", "type": "anime_title", "answer": "Blue Period", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-03-07"},
+    {"clue": "🗡️ 👤 ⬆️ 🏰", "type": "anime_title", "answer": "Solo Leveling", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-03-07"},
+    {"clue": "\"There you are, sweetheart. Sorry I'm late. I was looking everywhere for you.\"", "type": "anime_title", "answer": "Howl's Moving Castle", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-03-07"},
+    {"clue": "\"Prodigious!\"", "type": "anime_title", "answer": "Digimon Adventure", "verification": "bot-reveal-transcript-plus-runtime-paired-reveal-2026-09-03-07"}
   ]
 }

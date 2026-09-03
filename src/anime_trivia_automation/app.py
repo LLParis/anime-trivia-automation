@@ -45,6 +45,15 @@ from .vlm import LazyQwenResolver
 
 LOGGER = logging.getLogger(__name__)
 
+# Reviewed Anime Soul equivalences whose accepted/reveal spelling differs from
+# the title or legal name a general anime model returns. Apply these before the
+# generic catalog and knowledge-index canonicalizers: the latter maps Mello in
+# the opposite direction and does not recognize the Digimon dub branding.
+_BOT_CANONICAL_ANSWER_ALIASES: dict[tuple[str, str], str] = {
+    ("character", "mihael keehl"): "Mello",
+    ("anime_title", "digimon digital monsters"): "Digimon Adventure",
+}
+
 
 @dataclass
 class PendingRound:
@@ -1316,6 +1325,12 @@ class AnimeTriviaAutomation:
         solver produced "Steins;Gate" and "DAN DA DAN". The reveal catalog
         (exact or near-exact) wins, then the local index's canonical title.
         """
+
+        reviewed_alias = _BOT_CANONICAL_ANSWER_ALIASES.get(
+            (answer_type, normalize_question(answer))
+        )
+        if reviewed_alias is not None:
+            return reviewed_alias
 
         novel = getattr(self, "_novel", None)
         if novel is None:

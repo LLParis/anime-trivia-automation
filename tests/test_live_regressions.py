@@ -1253,6 +1253,31 @@ class LiveRegressionTests(unittest.TestCase):
                 )
             )
 
+    def test_reviewed_bot_aliases_win_before_generic_canonicalization(self) -> None:
+        app = AnimeTriviaAutomation.__new__(AnimeTriviaAutomation)
+        app._novel = None
+
+        # Sep 3 Q2: the bot accepted the legal name but revealed the shorter
+        # character name. Q10: the dub branding was sent first and rejected;
+        # the bot wanted the series title revealed below.
+        self.assertEqual(
+            app._canonical_answer_form("Mihael Keehl", "character"),
+            "Mello",
+        )
+        self.assertEqual(
+            app._canonical_answer_form("Digimon: Digital Monsters", "anime_title"),
+            "Digimon Adventure",
+        )
+        self.assertEqual(
+            app._canonical_answer_form("digimon digital monsters", "anime_title"),
+            "Digimon Adventure",
+        )
+        # Aliases are answer-type scoped and cannot rewrite unrelated values.
+        self.assertEqual(
+            app._canonical_answer_form("Mihael Keehl", "anime_title"),
+            "Mihael Keehl",
+        )
+
     def test_answers_are_typed_in_human_form(self) -> None:
         from anime_trivia_automation.utils import humanize_answer
 

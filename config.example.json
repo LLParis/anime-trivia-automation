@@ -175,8 +175,8 @@
     ],
     "expected_window_title_contains": "Anime Soul - Discord",
     "pre_delay_seconds": [
-      0.05,
-      0.15
+      0.0,
+      0.0
     ],
     "key_delay_seconds": [
       0.012,
@@ -190,7 +190,7 @@
     "composer_class_fragment": "slateTextArea",
     "respect_detected_countdown": true,
     "fallback_answer_open_delay_seconds": 5.0,
-    "enter_after_open_slack_seconds": 0.06,
+    "enter_after_open_slack_seconds": 0.015,
     "max_answer_characters": 96,
     "stop_key": "f12",
     "composer_write_mode": "type",
