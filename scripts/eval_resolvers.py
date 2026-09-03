@@ -50,7 +50,7 @@ def matches(expected: str, produced: str | None) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="config.json")
-    parser.add_argument("--provider", choices=("gemini", "qwen"), default="qwen")
+    parser.add_argument("--provider", choices=("gemini", "qwen", "antigravity"), default="qwen")
     parser.add_argument("--limit", type=int, default=20, help="most recent N pairs")
     parser.add_argument("--offset", type=int, default=0, help="skip the newest N pairs")
     parser.add_argument("--pause", type=float, default=4.0, help="seconds between calls")
@@ -70,7 +70,50 @@ def main() -> int:
     pairs = pairs[-args.limit :] if args.limit else pairs
 
     rows: list[dict[str, object]] = []
-    if args.provider == "gemini":
+    if args.provider == "antigravity":
+        from anime_trivia_automation.antigravity import AntigravityProvider, AntigravityRequest
+
+        provider = AntigravityProvider(config.antigravity)
+        availability = asyncio.run(provider.preflight())
+        print(f"antigravity preflight: {availability.phase} ({availability.detail})")
+        if not availability.available:
+            return 2
+
+        async def run_all():
+            for pair in pairs:
+                started = time.perf_counter()
+                result = await provider.resolve(
+                    AntigravityRequest(
+                        clue=pair["clue"],
+                        expected_answer_type=pair["type"],  # type: ignore[arg-type]
+                        prompt_kind="text",
+                    )
+                )
+                elapsed = (time.perf_counter() - started) * 1000.0
+                hit_index = 1 if result.answer and matches(pair["answer"], result.answer) else 0
+                rows.append(
+                    {
+                        "clue": pair["clue"],
+                        "type": pair["type"],
+                        "expected": pair["answer"],
+                        "status": result.status,
+                        "answer": result.answer,
+                        "alternatives": [],
+                        "confidence": round(result.confidence, 3),
+                        "latency_ms": round(elapsed),
+                        "hit_index": hit_index,
+                    }
+                )
+                mark = "OK " if hit_index else "MISS"
+                print(
+                    f"{mark} {elapsed:6.0f}ms {result.status:9} conf={result.confidence:.2f} "
+                    f"{pair['answer']!r} <- {result.answer!r} | {pair['clue'][:60]}",
+                    flush=True,
+                )
+            await provider.close()
+
+        asyncio.run(run_all())
+    elif args.provider == "gemini":
         provider = GeminiProvider(config.gemini)
         availability = asyncio.run(provider.preflight())
         print(f"gemini preflight: {availability.phase} ({availability.detail})")

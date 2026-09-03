@@ -517,6 +517,10 @@ class SafeKeyboardExecutor:
         # there when the next round starts (Enter not honoured), it is ours to
         # clear, not a human draft.
         self._last_owned_answer: str | None = None
+        # Persisted copy of the last text this app left in the composer, so a
+        # fresh launch can recognise (and clear) its own leftover instead of
+        # treating it as the operator's draft.
+        self.owned_draft_path: Path | None = None
         self._text_input = BatchedWindowsInput()
 
     @staticmethod
@@ -547,14 +551,29 @@ class SafeKeyboardExecutor:
         target = self._guard.expected_window()
         if target is None:
             return ComposerProbeResult(False, "no unique Discord window is open")
+        previous = self._guard.current()
+        displaced = previous is not None and previous.hwnd != target.hwnd
         # A draft the operator left in the box is theirs. Wait for it to be
         # sent or cleared (re-checking idle) instead of failing the launch.
+        # Text this app itself left behind (persisted at the time) is ours to
+        # clear right away.
         waited_for_empty = False
         while True:
             try:
                 peek = self._composer_locator.find(target.hwnd, target.process_id)
-                occupied = peek is not None and peek.value() != ""
+                value = peek.value() if peek is not None else ""
+                if peek is not None and value and self._is_owned_leftover(value):
+                    if self._guard.activate(target.hwnd):
+                        if not peek.focused():
+                            peek.set_focus()
+                            time.sleep(0.1)
+                        if self._keystroke_clear(peek, value):
+                            LOGGER.info("Cleared this app's own leftover %r at launch", value)
+                            self._persist_owned_draft(None)
+                            value = ""
+                occupied = bool(value)
             except Exception:
+                LOGGER.warning("Composer inspection failed during the probe", exc_info=True)
                 occupied = False
             if not occupied:
                 break
@@ -575,8 +594,6 @@ class SafeKeyboardExecutor:
                         False, "operator kept typing; composer probe could not run"
                     )
                 time.sleep(0.25)
-        previous = self._guard.current()
-        displaced = previous is not None and previous.hwnd != target.hwnd
         if displaced and not self._guard.activate(target.hwnd):
             return ComposerProbeResult(False, "Windows refused to raise Discord")
         try:
@@ -797,7 +814,37 @@ class SafeKeyboardExecutor:
             return False
 
     def _is_owned_leftover(self, value: str) -> bool:
-        return bool(self._last_owned_answer) and value == self._last_owned_answer
+        if self._last_owned_answer and value == self._last_owned_answer:
+            return True
+        persisted = self._load_owned_draft()
+        return bool(persisted) and value == persisted
+
+    def _load_owned_draft(self) -> str | None:
+        path = self.owned_draft_path
+        if path is None or not path.exists():
+            return None
+        try:
+            import json
+
+            value = json.loads(path.read_text(encoding="utf-8")).get("answer")
+            return value if isinstance(value, str) and value else None
+        except Exception:
+            return None
+
+    def _persist_owned_draft(self, answer: str | None) -> None:
+        path = self.owned_draft_path
+        if path is None:
+            return
+        try:
+            import json
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if answer:
+                path.write_text(json.dumps({"answer": answer}), encoding="utf-8")
+            elif path.exists():
+                path.unlink()
+        except OSError:
+            LOGGER.debug("Could not persist the owned draft", exc_info=True)
 
     def _keystroke_clear(self, composer: DiscordComposer, expected: str) -> bool:
         """Select-all + Backspace inside the focused composer holding our text.
@@ -1481,9 +1528,10 @@ class SafeKeyboardExecutor:
                 event_id=f"{event_token}:rehearsal",
                 increment="submitted",
             )
-            # Still ours: the next rehearsal round may clear it if it is
-            # untouched, so nothing has to be deleted by hand between rounds.
+            # Still ours: the next rehearsal round (or the next launch) clears
+            # it if untouched, so nothing has to be deleted by hand.
             self._last_owned_answer = answer
+            self._persist_owned_draft(answer)
             return True
 
         def dispatch_enter_if_owned() -> bool:
@@ -1567,7 +1615,8 @@ class SafeKeyboardExecutor:
                 if not cleared and composer.value() == answer:
                     # Leave nothing behind: a stuck answer blocked Q4, Q5, and
                     # Q9 on 2026-09-02 18:00 as "manual text".
-                    self._keystroke_clear(composer, answer)
+                    if not self._keystroke_clear(composer, answer):
+                        self._persist_owned_draft(answer)
             except Exception:
                 self._remember_orphan(answer)
                 self._restore_foreground()

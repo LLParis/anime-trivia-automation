@@ -214,6 +214,7 @@ class AnimeTriviaAutomation:
             self._stop_event,
             status=self._status,
         )
+        self._keyboard.owned_draft_path = config.runtime.status_path.parent / "owned_draft.json"
         self._dispatcher = AnswerDispatcher(
             self._keyboard,
             self._active_prompt,
