@@ -199,7 +199,8 @@
     "activation_idle_ms": 350,
     "restore_previous_foreground": true,
     "max_guesses_per_round": 3,
-    "guess_gap_seconds": 5.2
+    "guess_gap_seconds": 5.2,
+    "humanize_answers": true
   },
   "status": {
     "enabled": true,

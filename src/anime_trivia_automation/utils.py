@@ -47,6 +47,26 @@ def describe_emoji(clue: str) -> str:
     return ", ".join(names)
 
 
+def humanize_answer(answer: str, *, lowercase: bool = True, strip_punctuation: bool = True) -> str:
+    """The form a person types: lowercase, no punctuation, single spaces.
+
+    Anime Soul accepted "girls last tour", "steins gate", and "one piece" from
+    players on 2026-09-02; nobody types "Girls' Last Tour". Digits and letters
+    (any script) are kept, everything else becomes a space.
+    """
+
+    value = unicodedata.normalize("NFKC", answer)
+    if strip_punctuation:
+        # Apostrophes vanish ("natsumes"), every other mark becomes a space
+        # ("one punch man", "steins gate").
+        value = value.replace("'", "").replace("\u2019", "")
+        value = "".join(character if character.isalnum() else " " for character in value)
+    if lowercase:
+        value = value.casefold()
+    value = " ".join(value.split())
+    return value or answer
+
+
 def short_signature(namespace: str, value: str) -> str:
     payload = f"{namespace}\0{value}".encode("utf-8", errors="replace")
     return f"{namespace}:{hashlib.sha256(payload).hexdigest()[:24]}"

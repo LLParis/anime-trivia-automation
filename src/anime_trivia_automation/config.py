@@ -344,6 +344,8 @@ class TypingConfig:
     # live launch and refuse to arm if it fails.
     live_probe_at_launch: bool = True
     live_probe_wait_seconds: float = 90.0
+    # Type answers the way people do: lowercase and without punctuation.
+    humanize_answers: bool = True
     # Rehearsal: run the whole live path against the real composer but leave
     # the typed answer in the box instead of pressing Enter (set by --rehearse).
     press_enter: bool = True
@@ -628,6 +630,7 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         max_guesses_per_round=int(typing_raw.get("max_guesses_per_round", 3)),
         live_probe_at_launch=bool(typing_raw.get("live_probe_at_launch", True)),
+        humanize_answers=bool(typing_raw.get("humanize_answers", True)),
         live_probe_wait_seconds=float(
             typing_raw.get("live_probe_wait_seconds", 90.0)
         ),

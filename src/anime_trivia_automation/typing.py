@@ -17,7 +17,7 @@ from .config import ReadinessConfig, TypingConfig
 from .discord import DiscordComposer, DiscordComposerLocator
 from .models import AnswerTask
 from .status import NullStatus, OperatorStatus
-from .utils import normalize_question, sanitize_answer
+from .utils import humanize_answer, normalize_question, sanitize_answer
 from .windows_input import BatchedWindowsInput
 
 LOGGER = logging.getLogger(__name__)
@@ -820,7 +820,7 @@ class SafeKeyboardExecutor:
         return bool(persisted) and value == persisted
 
     def _load_owned_draft(self) -> str | None:
-        path = self.owned_draft_path
+        path = getattr(self, "owned_draft_path", None)
         if path is None or not path.exists():
             return None
         try:
@@ -832,7 +832,7 @@ class SafeKeyboardExecutor:
             return None
 
     def _persist_owned_draft(self, answer: str | None) -> None:
-        path = self.owned_draft_path
+        path = getattr(self, "owned_draft_path", None)
         if path is None:
             return
         try:
@@ -1397,6 +1397,10 @@ class SafeKeyboardExecutor:
         if answer is None:
             LOGGER.warning("Rejected unsafe/empty answer: %r", task.answer)
             return False
+        if self._config.humanize_answers:
+            # Ledger and panel keep the canonical spelling; the keys sent are
+            # what a person would type.
+            answer = humanize_answer(answer)
         if not self._config.enabled:
             LOGGER.info(
                 "DRY RUN [%s] %s -> %s", task.source, task.question_label or "?", answer

@@ -173,6 +173,41 @@ def main() -> int:
             clue_file.unlink()
         time.sleep(args.blank)
     root.destroy()
+    # Leave the box the way we found it: erase the last typed answer if it is
+    # still there untouched.
+    last = next((r["typed"] for r in reversed(results) if r["typed"]), None)
+    if last:
+        try:
+            from pynput.keyboard import Controller, Key
+
+            from anime_trivia_automation.discord import DiscordComposerLocator
+            from anime_trivia_automation.typing import ForegroundWindowGuard
+
+            guard = ForegroundWindowGuard(config.typing)
+            target = guard.expected_window()
+            composer = (
+                DiscordComposerLocator(
+                    config.typing.composer_name_prefix, config.typing.composer_class_fragment
+                ).find(target.hwnd, target.process_id)
+                if target
+                else None
+            )
+            if composer is not None and composer.value() == last and guard.activate(target.hwnd):
+                if not composer.focused():
+                    composer.set_focus()
+                    time.sleep(0.1)
+                controller = Controller()
+                with controller.pressed(Key.ctrl):
+                    controller.press("a")
+                    controller.release("a")
+                controller.press(Key.backspace)
+                controller.release(Key.backspace)
+                print(f"cleared the last practice answer {last!r} from the composer", flush=True)
+                owned = config.runtime.status_path.parent / "owned_draft.json"
+                if owned.exists():
+                    owned.unlink()
+        except Exception as exc:
+            print(f"could not clear the last answer: {type(exc).__name__}", flush=True)
     ok = sum(1 for r in results if r["ok"])
     typed_n = sum(1 for r in results if r["typed"])
     lat = sorted(r["latency_s"] for r in results if r["latency_s"] is not None)

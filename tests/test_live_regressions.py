@@ -293,6 +293,7 @@ def make_executor(
     *,
     write_mode: str = "type",
     auto_activate: bool = True,
+    humanize: bool = False,
 ) -> SafeKeyboardExecutor:
     executor = SafeKeyboardExecutor.__new__(SafeKeyboardExecutor)
     executor._config = TypingConfig(
@@ -311,6 +312,7 @@ def make_executor(
         composer_write_mode=write_mode,
         auto_activate_discord=auto_activate,
         activation_idle_ms=350,
+        humanize_answers=humanize,
     )
     executor._activated_from = None
     executor._readiness_config = ReadinessConfig(
@@ -1250,6 +1252,34 @@ class LiveRegressionTests(unittest.TestCase):
                     typing=TypingConfig(composer_write_mode="clipboard"),
                 )
             )
+
+    def test_answers_are_typed_in_human_form(self) -> None:
+        from anime_trivia_automation.utils import humanize_answer
+
+        self.assertEqual(humanize_answer("Girls' Last Tour"), "girls last tour")
+        self.assertEqual(humanize_answer("Steins;Gate"), "steins gate")
+        self.assertEqual(humanize_answer("One-Punch Man"), "one punch man")
+        self.assertEqual(humanize_answer("86 Eighty-Six"), "86 eighty six")
+        self.assertEqual(humanize_answer("Natsume's Book of Friends"), "natsumes book of friends")
+        self.assertEqual(humanize_answer("...", strip_punctuation=True), "...")
+
+        active = ActivePromptState()
+        signature = "round:anime_title:8/10"
+        active.update(signature, "ready", 1, "text:girls")
+        composer = FakeComposer()
+        executor = make_executor(active, composer, humanize=True)
+        task = AnswerTask(
+            answer="Girls' Last Tour",
+            prompt_signature=signature,
+            expected_answer_type="anime_title",
+            question_label="8/10",
+            detected_at=time.monotonic(),
+            countdown_seconds=0.0,
+            source="antigravity-account",
+            clue_fingerprint="text:girls",
+        )
+        self.assertTrue(executor.execute(task))
+        self.assertEqual(executor._text_input.sent, ["girls last tour"])
 
     def test_stuck_owned_answer_is_cleared_before_the_next_round(self) -> None:
         # 2026-09-02 18:00: Q3's text stayed in the box after Enter, so Q4, Q5,
