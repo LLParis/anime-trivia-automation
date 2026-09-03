@@ -198,21 +198,50 @@ text went 0.34 s → **0.17 s**.
   more than once.
 - `data/answer_catalog.seed.json` — 239 candidate answers. 8 of the 10 answers on
   2026-09-03 were already in it.
-- `data/anime_knowledge.sqlite` — 589 MB local index: 61,960 anime, 87,664
-  characters, 324,518 anime aliases, 201,473 character aliases, 158,232
-  full-text-searchable records, and **8,586 quotes** with title and speaker.
+- `data/anime_knowledge.sqlite` — 589 MB index built 2026-09-01 from three
+  ingested datasets (724 MB raw under `data/external/`):
+
+  | Source | Raw | Contributes |
+  |---|---|---|
+  | AniList API snapshot | 664 MB | 20,423 anime with synopsis + genre/theme tags; **87,664 characters with description text** |
+  | Manami anime-offline-database (ODbL) | 60 MB | 41,537 anime titles with aliases |
+  | ewgsta English Anime Quotes (MIT) | 1.5 MB | 8,608 quotes with title and speaker |
+
+  Consolidated: 61,960 anime, 87,664 characters, 324,518 anime aliases, 201,473
+  character aliases, 158,232 FTS-indexed records (158,006 carrying a snippet,
+  154,635 carrying tags).
+
+  **This corpus is the most underexploited thing we own.** It is currently used
+  only by a disabled local solver. Two baselines measured today, both offline
+  and with no model calls:
+
+  | Clue type | Share of clues | Method | Result |
+  |---|---|---|---|
+  | Quotation | 66/186 (35%) | exact + substring match on `quotes.normalized_quote` | **19 resolved, 0 wrong** (29% of quote clues, 100% precision) |
+  | Prose description | 62/186 (33%) | SQLite FTS5 BM25 over character/anime records | 15% correct at rank 1, **26% correct in top 5** |
+
+  The prose number is the interesting one: it is a naive bag-of-nouns keyword
+  query against paraphrased descriptions, which is close to the worst reasonable
+  retrieval design. The clues genuinely are paraphrases of the corpus content —
+  "A young witch who leaves home at thirteen, starts a flying delivery service,
+  and is accompanied by a black cat" is Kiki's description in different words —
+  so the ceiling here should be far above 26%, and the gap is a retrieval
+  problem we have not yet attacked.
 - `runtime/round_ledger.jsonl` — append-only JSONL of every state transition
   with wall-clock and monotonic stamps. This is what made today's diagnoses
   possible and is the single most valuable piece of instrumentation in the
   system.
 
-**An untapped lead, measured today.** Testing the local quote index against
-every quotation clue in the history: **19 of 66 resolved, with zero wrong
-answers.** That is 10% of all rounds answerable by a SQLite lookup in
-milliseconds at 100% observed precision, versus a 6 s model call. The 47 misses
-are famous lines the corpus simply lacks (Sailor Moon's transformation line,
-Gurren Lagann's drill line, Team Rocket's motto), so this is a corpus-coverage
-problem, not an approach problem.
+The 47 unresolved quotations are famous lines the corpus simply lacks (Sailor
+Moon's transformation line, Gurren Lagann's drill line, Team Rocket's motto), so
+that half is a corpus-coverage problem rather than a method problem. The prose
+half is the opposite: the content is present and our retrieval is too weak to
+find it.
+
+Taken together, **68% of all clues are quotations or prose descriptions**, both
+of which are in principle answerable from local data in milliseconds with no
+model call at all. That is the single biggest opportunity in the system, and it
+is a retrieval and corpus question rather than a reasoning one.
 
 ---
 
@@ -267,6 +296,11 @@ These are hard requirements, not preferences. Any proposal must respect them.
 Ranked by expected value. Concrete, evidence-backed answers are far more useful
 than surveys.
 
+0. **Read section 6 first.** The corpus question in item 3 below is, on the
+   evidence, worth more than everything else combined: two thirds of clues are
+   answerable from data already sitting on this machine, and we are reaching
+   very little of it.
+
 1. **Sub-second solving.** The core tension: easy clues need an answer within
    ~1 s of the card appearing to beat a 1.3 s human, and our cloud solver's
    floor is ~3.2 s including process spawn. What architectures get a
@@ -284,11 +318,21 @@ than surveys.
    embeddings? Constrained decoding over the candidate set? Is there prior art
    on rebus solving we should read?
 
-3. **Quote retrieval coverage.** 29% of quote clues resolve from a local corpus
-   at 100% precision. Where do we get a materially larger, well-attributed anime
-   quotation corpus, and what retrieval design handles paraphrase and
-   translation variance? The same English line is often subtitled differently
-   across releases.
+3. **Local retrieval over the corpus we already have — probably the highest
+   value question here.** 68% of clues are quotations or prose descriptions, and
+   we hold 8,608 quotes, 87,664 character descriptions and 20,423 anime
+   synopses locally. Current baselines to beat: quotes 29% at 100% precision by
+   string match; prose 15% rank-1 / 26% top-5 by BM25. What retrieval design
+   would you build against this corpus, given a hard budget of roughly 200 ms on
+   an RTX 5090 and a strict requirement that a wrong confident answer is worse
+   than silence? Specifically: which embedding model for short paraphrased
+   descriptions against 87k character bios, how to index and quantize 158k
+   records for that latency, how to calibrate a confidence threshold so it
+   abstains rather than guesses, and how to handle the name-form gap between the
+   quiz's answers and the corpus's titles ("Canute" vs "Canute Svenson",
+   "Mello" vs "Mihael Keehl"). Also: where do we get a materially larger,
+   well-attributed anime quotation corpus, given the same English line is
+   subtitled differently across releases?
 
 4. **Answer-form matching.** The bot accepted "Mihael Keehl" for the reveal
    "Mello" but rejected "Digimon: Digital Monsters" for "Digimon Adventure". We
