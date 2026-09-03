@@ -1756,7 +1756,25 @@ class AnimeTriviaAutomation:
         )
         if hit is not None:
             LOGGER.info("Authoritative Discord clue hit: %r", accessible.clue)
-        return hit
+            return hit
+        # An emoji rebus reaches neither exact nor fuzzy matching: the bot never
+        # repeats a clue, and normalize_question reduces a rebus to nothing. But
+        # a returning answer keeps part of its old symbols, so similarity against
+        # past rebuses answers some rounds outright -- in half a second, where
+        # the solver spends 15-40 s on a rebus and declines about half the time.
+        affinity = self._cache.match_emoji_affinity(
+            accessible.clue,
+            observation.expected_answer_type,
+        )
+        if affinity is not None:
+            LOGGER.info(
+                "Emoji affinity hit: %r -> %s (%.0f, runner-up %.0f)",
+                accessible.clue,
+                affinity.answer,
+                affinity.score,
+                affinity.runner_up_score or 0.0,
+            )
+        return affinity
 
     def _rehearsal_clue(self, observation: PromptObservation) -> tuple[Any, bool]:
         """Clue injected by scripts/rehearse_batch.py for a painted card."""

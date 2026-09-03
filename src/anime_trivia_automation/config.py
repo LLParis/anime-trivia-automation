@@ -221,6 +221,15 @@ class MatchConfig:
     phash_size: int = 16
     phash_max_distance: int = 10
     phash_distance_margin: int = 3
+    # Emoji rebuses never repeat exactly, but a returning answer keeps part of
+    # its old symbols: Evangelion came back as the same four reordered,
+    # Delicious in Dungeon shared three of four, Blue Period shared the palette
+    # and the school. Leave-one-out over the 58 real rebuses puts 0.50 at 80%
+    # precision, which is worth having because the alternative for an emoji
+    # round is a 15-40 s model call that declines about half the time.
+    emoji_affinity_threshold: float = 0.50
+    # A rival title scoring nearly as well means the shared symbols are generic.
+    emoji_affinity_margin: float = 0.06
 
 
 @dataclass(frozen=True)
@@ -562,6 +571,10 @@ def load_config(path: str | Path) -> AppConfig:
     matching = MatchConfig(
         text_score_threshold=float(match_raw.get("text_score_threshold", 88.0)),
         text_score_margin=float(match_raw.get("text_score_margin", 4.0)),
+        emoji_affinity_threshold=float(
+            match_raw.get("emoji_affinity_threshold", 0.50)
+        ),
+        emoji_affinity_margin=float(match_raw.get("emoji_affinity_margin", 0.06)),
         phash_size=int(match_raw.get("phash_size", 16)),
         phash_max_distance=int(match_raw.get("phash_max_distance", 10)),
         phash_distance_margin=int(match_raw.get("phash_distance_margin", 3)),

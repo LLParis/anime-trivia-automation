@@ -1779,5 +1779,112 @@ class LiveRegressionTests(unittest.TestCase):
         self.assertTrue(executor._controller.entered)
 
 
+
+class EmojiAffinityTests(unittest.TestCase):
+    """An emoji rebus must be answerable without a model call.
+
+    Anime Soul never repeats a clue, and normalize_question reduces a rebus to
+    an empty string, so exact and fuzzy history matching both miss every emoji
+    round. But a returning answer keeps part of its symbols: Evangelion came
+    back as the same four reordered, Delicious in Dungeon shared three of four,
+    Blue Period shared the palette and the school.
+    """
+
+    def _cache(self, pairs):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from anime_trivia_automation.cache import TriviaCache
+        from anime_trivia_automation.config import MatchConfig
+
+        self._temporary = tempfile.TemporaryDirectory()
+        root = Path(self._temporary.name)
+        (root / "history.json").write_text(
+            json.dumps({"schema_version": 1, "pairs": pairs}), encoding="utf-8"
+        )
+        return TriviaCache(
+            root / "cache.json",
+            MatchConfig(),
+            history_path=root / "history.json",
+        )
+
+    def tearDown(self) -> None:
+        temporary = getattr(self, "_temporary", None)
+        if temporary is not None:
+            temporary.cleanup()
+
+    def test_a_reordered_rebus_matches_its_earlier_form(self) -> None:
+        cache = self._cache(
+            [
+                {"clue": "🤖 🟣 🩽 🌇",
+                 "type": "anime_title", "answer": "Neon Genesis Evangelion"},
+                {"clue": "🏀 🌸 🟥 👟",
+                 "type": "anime_title", "answer": "Slam Dunk"},
+            ]
+        )
+        hit = cache.match_emoji_affinity(
+            "🤖 🩽 🟣 🌇", "anime_title"
+        )
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.answer, "Neon Genesis Evangelion")
+        self.assertEqual(hit.kind, "emoji-affinity")
+
+    def test_a_partial_overlap_still_matches(self) -> None:
+        cache = self._cache(
+            [
+                {"clue": "🥘 🐉 🗺 🍄",
+                 "type": "anime_title", "answer": "Delicious in Dungeon"},
+                {"clue": "🏀 🌸 🟥 👟",
+                 "type": "anime_title", "answer": "Slam Dunk"},
+            ]
+        )
+        hit = cache.match_emoji_affinity(
+            "🥘 🐉 🛡 🗺", "anime_title"
+        )
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.answer, "Delicious in Dungeon")
+
+    def test_prose_and_unrelated_rebuses_are_refused(self) -> None:
+        cache = self._cache(
+            [
+                {"clue": "🥘 🐉 🗺 🍄",
+                 "type": "anime_title", "answer": "Delicious in Dungeon"},
+            ]
+        )
+        # Prose belongs to the text path, never to this one.
+        self.assertIsNone(
+            cache.match_emoji_affinity('"A corpse is talking."', "anime_title")
+        )
+        # A rebus sharing nothing must stay silent rather than guess.
+        self.assertIsNone(
+            cache.match_emoji_affinity(
+                "🏀 🌸 🟥 👟", "anime_title"
+            )
+        )
+        # The answer type is respected.
+        self.assertIsNone(
+            cache.match_emoji_affinity(
+                "🥘 🐉 🗺 🍄", "character"
+            )
+        )
+
+    def test_two_titles_sharing_generic_symbols_are_declined(self) -> None:
+        # A school and a superhero are shared by many titles. Guessing between
+        # near-tied rivals is how a plausible neighbour gets posted, so the
+        # margin rule must keep this silent and leave the round to the solver.
+        cache = self._cache(
+            [
+                {"clue": "🏫 🦸 📚 💥",
+                 "type": "anime_title", "answer": "My Hero Academia"},
+                {"clue": "🏫 🦸 💥 👊",
+                 "type": "anime_title", "answer": "One-Punch Man"},
+            ]
+        )
+        hit = cache.match_emoji_affinity(
+            "🏫 🦸 💥 🌟", "anime_title"
+        )
+        self.assertIsNone(hit)
+
 if __name__ == "__main__":
     unittest.main()

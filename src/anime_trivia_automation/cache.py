@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
+import unicodedata
+from collections import Counter
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +33,41 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+# Words in Unicode emoji names that carry no meaning for a rebus.
+_EMOJI_NAME_NOISE = frozenset(
+    {"and", "with", "the", "of", "sign", "symbol", "mark", "face", "selector"}
+)
+
+
+def emoji_affinity_tokens(clue: str) -> Counter[str]:
+    """Weighted tokens for an emoji rebus: the glyphs, plus their name words.
+
+    The glyph itself is the strongest signal, so it is weighted double. Name
+    words are weaker but bridge the substitutions the bot actually makes: Initial
+    D arrived once as a car and once as an oncoming car, which share nothing as
+    codepoints but both carry "automobile".
+    """
+
+    bag: Counter[str] = Counter()
+    for character in unicodedata.normalize("NFKC", clue):
+        if character in ("️", "‍") or character.isspace():
+            continue
+        category = unicodedata.category(character)
+        if not (category.startswith("S") or ord(character) > 0xFFFF):
+            continue
+        bag[f"glyph:{character}"] += 2
+        for word in unicodedata.name(character, "").replace("-", " ").lower().split():
+            if len(word) > 2 and word not in _EMOJI_NAME_NOISE:
+                bag[f"word:{word}"] += 1
+    return bag
+
+
+def is_emoji_clue(clue: str) -> bool:
+    """A rebus, not prose: the text-matching path normalizes this to nothing."""
+
+    return bool(clue) and sum(ch.isalpha() for ch in clue) < 3
+
+
 class TriviaCache:
     """In-memory fuzzy/pHash indexes backed by an atomically replaced JSON file."""
 
@@ -51,6 +89,10 @@ class TriviaCache:
         self._semantic_index: dict[tuple[str, str], tuple[str, str]] = {}
         self._history_exact: dict[tuple[str, str], str] = {}
         self._history_text: dict[tuple[str, str], str] = {}
+        # Emoji rebuses, kept as unit-normalized TF-IDF vectors for similarity.
+        self._emoji_entries: list[tuple[str, str, dict[str, float]]] = []
+        self._emoji_idf: dict[str, float] = {}
+        self._emoji_default_idf: float = 0.0
         self._load()
         self._load_history()
 
@@ -239,6 +281,7 @@ class TriviaCache:
         pairs = raw.get("pairs", [])
         if not isinstance(pairs, list):
             raise TypeError("History pairs must be a JSON array")
+        rebuses: list[tuple[str, str, Counter[str]]] = []
         for pair in pairs:
             if not isinstance(pair, dict):
                 raise TypeError("Each history pair must be a JSON object")
@@ -262,10 +305,116 @@ class TriviaCache:
                 if existing is not None and existing != answer:
                     raise ValueError(f"Conflicting history answers for {clue!r}")
                 index[key] = answer
+            if is_emoji_clue(clue):
+                rebuses.append((expected_type, answer, emoji_affinity_tokens(clue)))
+        self._build_emoji_affinity(rebuses)
         LOGGER.info(
             "Authoritative Discord history loaded: %d clues (%s)",
             len(self._history_exact),
             self._history_path,
+        )
+
+    def _build_emoji_affinity(
+        self, rebuses: list[tuple[str, str, Counter[str]]]
+    ) -> None:
+        """Vectorize the known rebuses once, TF-IDF weighted and unit length."""
+
+        self._emoji_entries = []
+        self._emoji_idf = {}
+        self._emoji_default_idf = 0.0
+        if not rebuses:
+            return
+        total = len(rebuses)
+        document_frequency: Counter[str] = Counter()
+        for _type, _answer, bag in rebuses:
+            document_frequency.update(bag.keys())
+        default_idf = math.log(total + 1)
+        idf = {
+            token: math.log((total + 1) / (count + 0.5))
+            for token, count in document_frequency.items()
+        }
+        self._emoji_idf = idf
+        self._emoji_default_idf = default_idf
+        for expected_type, answer, bag in rebuses:
+            vector = self._unit_vector(bag, idf, default_idf)
+            if vector:
+                self._emoji_entries.append((expected_type, answer, vector))
+        LOGGER.info("Emoji affinity index: %d rebuses", len(self._emoji_entries))
+
+    @staticmethod
+    def _unit_vector(
+        bag: Counter[str], idf: dict[str, float], default_idf: float
+    ) -> dict[str, float]:
+        raw = {
+            token: weight * idf.get(token, default_idf)
+            for token, weight in bag.items()
+        }
+        norm = math.sqrt(sum(value * value for value in raw.values()))
+        if not norm:
+            return {}
+        return {token: value / norm for token, value in raw.items()}
+
+    def match_emoji_affinity(
+        self, clue: str, expected_answer_type: str
+    ) -> CacheHit | None:
+        """Answer a rebus from a past rebus for the same title.
+
+        The bot never repeats a clue, so exact and fuzzy text matching both miss
+        every emoji round: ``normalize_question`` reduces a rebus to an empty
+        string. But a returning answer keeps part of its symbols, so cosine
+        similarity over glyphs and their name words recovers it with no model
+        call at all -- half a second instead of the 15-40 s an emoji round costs
+        the solver, which is the difference between winning and posting late.
+        """
+
+        if not self._emoji_entries or not is_emoji_clue(clue):
+            return None
+        bag = emoji_affinity_tokens(clue)
+        if not bag:
+            return None
+        # Scored against a fixed index, so reuse the IDF computed when it was
+        # built and treat an unseen glyph as maximally rare.
+        query = self._unit_vector(
+            bag, self._emoji_idf, self._emoji_default_idf
+        )
+        if not query:
+            return None
+        # Score per ANSWER, not per clue: a title with two rebuses on file would
+        # otherwise appear to be its own closest rival and hide a real tie.
+        by_answer: dict[str, float] = {}
+        for expected_type, answer, vector in self._emoji_entries:
+            if expected_type != expected_answer_type:
+                continue
+            score = sum(
+                weight * vector.get(token, 0.0) for token, weight in query.items()
+            )
+            if score > by_answer.get(answer, 0.0):
+                by_answer[answer] = score
+        if not by_answer:
+            return None
+        ranked = sorted(by_answer.items(), key=lambda item: -item[1])
+        best_answer, best_score = ranked[0]
+        runner_up = ranked[1][1] if len(ranked) > 1 else 0.0
+        if best_score < self._config.emoji_affinity_threshold:
+            return None
+        # A different title scoring almost as well means the shared symbols are
+        # generic (school, sword, crown). Stay silent rather than guess: this is
+        # the same discipline the fuzzy text path applies.
+        if best_score - runner_up < self._config.emoji_affinity_margin:
+            LOGGER.info(
+                "Emoji affinity declined: %s %.2f vs %s %.2f is too close",
+                best_answer,
+                best_score,
+                ranked[1][0],
+                runner_up,
+            )
+            return None
+        return CacheHit(
+            kind="emoji-affinity",
+            key=" ".join(sorted(token[6:] for token in bag if token.startswith("glyph:"))),
+            answer=best_answer,
+            score=best_score * 100.0,
+            runner_up_score=runner_up * 100.0,
         )
 
     def match_history(
