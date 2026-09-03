@@ -1,15 +1,17 @@
 # Anime Trivia Automation
 
-Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, answers from reviewed history first, resolves new semantic clues with account-authenticated Gemini 3.8, and types the first verified answer when the same card turns green.
+Windows client for Anime Soul trivia in Discord. It watches the calibrated primary-monitor region at 60 FPS, recognizes the newest card, answers from reviewed history first, resolves new clues with account-authenticated Gemini 3.8, and sends the first confident answer as real keyboard input the moment the same card turns green.
 
-Version 0.10.1 includes the 2026-09-02 noon live-run repair. It retains the v0.10 round policy and makes complete-value submission the only production writer:
+Version 0.10.2 is the repair after the 2026-09-02 noon and 18:00 runs, both of which resolved most clues correctly and still lost them at the composer:
 
 - **Any live card is answered.** The locked-Question-1 latch is gone. It made the worker ignore every card of a quiz it joined mid-way (all of Q7–Q10 on 2026-09-02 after the launcher crashed and was restarted). Red or green cards are always the live round; only grey cards are inert.
 - **First verified answer wins; later evidence can recover.** A wrong message triggers Discord's five-second slowmode, so follow-up guesses are spaced by at least five seconds. The first grounded answer to arrive is queued immediately; later distinct grounded answers can be tried only while the same card remains green, up to `typing.max_guesses_per_round`. Identical answers are never re-sent.
 - **Confidence and evidence remain real gates.** Antigravity must return a high-confidence structured answer. Local Qwen is a disabled workstation fallback after its 2026-09-02 evaluation produced only 7/20 correct first answers; when enabled elsewhere, an answer must match independent retrieved evidence and ungrounded alternatives are discarded.
 - **The measured provider is primary.** Account-authenticated Antigravity Gemini 3.8 handles Discord semantic text and emoji. The Gemini 3.8 Developer API is enabled only for a raw-image or account-provider-unavailable fallback; its circuit stops all later calls for five minutes after the first rate-limit error. Local Qwen submission remains disabled.
 - **Works while you research manually.** If Chrome/Gemini is in front when the card turns green, the app waits until you have been input-idle for `typing.activation_idle_ms`, raises the one Discord window itself, sends the answer, then hands focus back to the previous window.
-- **One complete answer at green.** The live writer uses a single UI Automation ValuePattern write (`typing.composer_write_mode = "uia"`) only after the same card is green, verifies the complete value, and then presses Enter. Character-at-a-time injection is rejected because Discord's Slate accessibility value can lag the visible editor and strand a one-letter prefix. Existing manual text always wins and is never erased.
+- **The answer is real input, sent once, verified once.** At green the complete answer goes into the composer as one `SendInput` batch of Unicode key events (`typing.composer_write_mode = "type"`), which Discord's Slate editor honours the way it honours typing. The accessibility value is checked once after a settle window instead of per character: measured on the live window on 2026-09-02, the value trails the keystrokes by about 40 ms, which is why per-character checks stranded a one-letter prefix at noon, and the UI Automation ValuePattern write (still available as `"uia"`) put text in the box that Enter did not send at 18:00 (Q3, Q7).
+- **Nothing is ever left stuck in the box.** After Enter the app waits up to a second for the composer to clear, presses Enter once more if its own text is still there, and otherwise erases exactly that text with select-all/backspace. If its own previous answer is still in the composer when the next round starts, it is cleared the same way; any other text is treated as yours and never touched (at 18:00 stuck text from Q3 and Q7 made the app skip Q4, Q5, and Q9 as "manual").
+- **Emoji cards are read even when Discord renders them differently.** The accessibility card parser falls back to structural parsing (status word ... "Answer with the ...") and to the bare emoji sequence, and logs any card name it cannot parse; at 18:00 four emoji rounds got no semantic read and went only to the slow API lane.
 - **Every round is on disk.** `runtime/logs/anime-trivia-<stamp>.log` holds the full per-launch log and `runtime/round_ledger.jsonl` records every status event with timestamps, so a failed quiz can be reconstructed instead of guessed at.
 
 ```text
@@ -23,7 +25,8 @@ DXcam 60 FPS physical-pixel crop
        -> raw image or account outage: one Gemini 3.8 Developer API fallback
        -> unresolved: warn and abstain; manual play stays available
   -> at green: raise Discord if needed (operator idle), claim the empty
-     #💜anime-chat composer, atomically stage the complete answer, verify, Enter
+     #💜anime-chat composer, SendInput the complete answer, verify once, Enter,
+     confirm the box cleared (second Enter / cleanup if not)
   -> follow-up guesses after the gap while the card is still green
   -> learn the durable answer only from the bot's own reveal
 ```
@@ -35,7 +38,8 @@ DXcam 60 FPS physical-pixel crop
 - `src/anime_trivia_automation/discord.py` — direct Windows UI Automation access to the semantic question, official reveals, and the exact Discord composer.
 - `src/anime_trivia_automation/cache.py` — authoritative history, fuzzy text, strict pHash, semantic clues, and atomic JSON persistence.
 - `src/anime_trivia_automation/app.py` — orchestration: scene processing, concurrent resolution with the guess ladder, reveal learning, shutdown.
-- `src/anime_trivia_automation/typing.py` — green-gated atomic UIA commit, composer ownership, idle-gated Discord activation and focus restore, the multi-guess dispatcher, and F12 stop.
+- `src/anime_trivia_automation/typing.py` — green-gated SendInput commit with settle verification, post-Enter clear confirmation and cleanup, composer ownership, idle-gated Discord activation and focus restore, the multi-guess dispatcher, and F12 stop.
+- `src/anime_trivia_automation/windows_input.py` — one-call `SendInput` Unicode text writer (no clipboard, no per-character boundary).
 - `src/anime_trivia_automation/status.py` — structured operator events, counters, heartbeat, atomic status persistence, and the JSONL round ledger.
 - `src/anime_trivia_automation/status_window.py` — passive top-right status panel using Windows no-activate/click-through styles.
 - `src/anime_trivia_automation/novel.py` — managed llama.cpp lifecycle, exact quote table, local BM25 + web retrieval, one ranked Qwen3.8 synthesis with alternatives, canonicalization.
