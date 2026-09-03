@@ -547,6 +547,34 @@ class SafeKeyboardExecutor:
         target = self._guard.expected_window()
         if target is None:
             return ComposerProbeResult(False, "no unique Discord window is open")
+        # A draft the operator left in the box is theirs. Wait for it to be
+        # sent or cleared (re-checking idle) instead of failing the launch.
+        waited_for_empty = False
+        while True:
+            try:
+                peek = self._composer_locator.find(target.hwnd, target.process_id)
+                occupied = peek is not None and peek.value() != ""
+            except Exception:
+                occupied = False
+            if not occupied:
+                break
+            if not waited_for_empty:
+                LOGGER.warning(
+                    "Discord composer holds text; waiting for it to be sent or cleared"
+                )
+                waited_for_empty = True
+            if time.monotonic() >= deadline or self._stop_event.is_set():
+                return ComposerProbeResult(
+                    False, "the composer still holds text; send or clear it and relaunch"
+                )
+            time.sleep(0.5)
+        if waited_for_empty:
+            while self._guard.idle_milliseconds() < idle_ms:
+                if time.monotonic() >= deadline or self._stop_event.is_set():
+                    return ComposerProbeResult(
+                        False, "operator kept typing; composer probe could not run"
+                    )
+                time.sleep(0.25)
         previous = self._guard.current()
         displaced = previous is not None and previous.hwnd != target.hwnd
         if displaced and not self._guard.activate(target.hwnd):
