@@ -1121,6 +1121,13 @@ class NovelAnswerResolver:
             LOGGER.exception("Could not load novel answer catalog; freeform answers remain allowed")
             return ()
 
+    def add_catalog_answer(self, answer: str) -> None:
+        """Remember a reveal the bot posted so later guesses use its spelling."""
+
+        cleaned = _collapse(answer)
+        if cleaned and cleaned not in self._catalog:
+            self._catalog = (*self._catalog, cleaned)
+
     def _canonicalize(self, answer: str) -> tuple[str, bool]:
         if not self._catalog:
             return answer, False
@@ -1128,6 +1135,12 @@ class NovelAnswerResolver:
         exact = { _normalize(candidate): candidate for candidate in self._catalog }
         if normalized in exact:
             return exact[normalized], True
+        # "DAN DA DAN" and "Dandadan", "Steins Gate" and "SteinsGate": the
+        # bot's reveal spelling wins whenever only spacing differs.
+        compact = normalized.replace(" ", "")
+        for candidate in self._catalog:
+            if compact and _normalize(candidate).replace(" ", "") == compact:
+                return candidate, True
         ranked = sorted(
             (
                 difflib.SequenceMatcher(None, normalized, _normalize(candidate)).ratio(),

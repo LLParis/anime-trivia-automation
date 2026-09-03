@@ -1481,7 +1481,9 @@ class SafeKeyboardExecutor:
                 event_id=f"{event_token}:rehearsal",
                 increment="submitted",
             )
-            self._last_owned_answer = None
+            # Still ours: the next rehearsal round may clear it if it is
+            # untouched, so nothing has to be deleted by hand between rounds.
+            self._last_owned_answer = answer
             return True
 
         def dispatch_enter_if_owned() -> bool:

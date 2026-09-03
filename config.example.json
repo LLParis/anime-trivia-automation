@@ -140,7 +140,7 @@
     "knowledge_index_path": "data/anime_knowledge.sqlite"
   },
   "gemini": {
-    "enabled": true,
+    "enabled": false,
     "api_key_env": "GEMINI_API_KEY",
     "primary_model": "gemini-3.8-flash",
     "primary_thinking_level": "low",

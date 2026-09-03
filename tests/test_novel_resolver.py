@@ -89,6 +89,18 @@ class NovelAnswerResolverTests(unittest.TestCase):
         resolver._ready = True
         return resolver
 
+    def test_catalog_matches_reveal_spelling_ignoring_spaces_and_learns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            resolver = self.make_resolver(directory)
+            self.assertEqual(resolver._canonicalize("attack on titan"), ("Attack on Titan", True))
+            self.assertEqual(resolver._canonicalize("AttackOnTitan"), ("Attack on Titan", True))
+            self.assertEqual(resolver._canonicalize("DAN DA DAN"), ("DAN DA DAN", False))
+            resolver.add_catalog_answer("Dandadan")
+            self.assertEqual(resolver._canonicalize("DAN DA DAN"), ("Dandadan", True))
+            self.assertEqual(resolver._canonicalize("Steins;Gate")[0], "Steins;Gate")
+            resolver.add_catalog_answer("Steins Gate")
+            self.assertEqual(resolver._canonicalize("Steins;Gate"), ("Steins Gate", True))
+
     def test_query_planning_is_deterministic_and_needs_no_model_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             resolver = self.make_resolver(directory)

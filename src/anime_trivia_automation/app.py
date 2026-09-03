@@ -1288,6 +1288,9 @@ class AnimeTriviaAutomation:
             cleaned = sanitize_answer(answer, self._config.typing.max_answer_characters)
             if cleaned is None:
                 continue
+            cleaned = self._canonical_answer_form(
+                cleaned, state.request.observation.expected_answer_type
+            )
             normalized = normalize_question(cleaned)
             if not normalized or normalized in seen:
                 continue
@@ -1304,6 +1307,30 @@ class AnimeTriviaAutomation:
         if state.candidate is None and state.guesses:
             state.candidate = state.guesses[0]
         return added
+
+    def _canonical_answer_form(self, answer: str, answer_type: str) -> str:
+        """Spell the answer the way the bot spells it.
+
+        The bot revealed "Steins Gate" and "Dandadan" on 2026-09-02 while the
+        solver produced "Steins;Gate" and "DAN DA DAN". The reveal catalog
+        (exact or near-exact) wins, then the local index's canonical title.
+        """
+
+        novel = getattr(self, "_novel", None)
+        if novel is None:
+            return answer
+        try:
+            canonical, catalog_hit = novel._canonicalize(answer)
+            if catalog_hit:
+                return canonical
+            knowledge = getattr(novel, "_knowledge", None)
+            if knowledge is not None and knowledge.available:
+                indexed = knowledge.canonical_answer(answer, answer_type)
+                if indexed:
+                    return indexed
+        except Exception:
+            LOGGER.debug("Answer canonicalization failed", exc_info=True)
+        return answer
 
     def _announce_resolution_guesses(
         self, state: AsyncResolutionRound, added: list[ProviderResolution]
@@ -1976,6 +2003,10 @@ class AnimeTriviaAutomation:
                 )
                 return
             answer = next(iter(new_answers.values()))
+        try:
+            self._novel.add_catalog_answer(answer)
+        except Exception:
+            LOGGER.debug("Could not extend the answer catalog", exc_info=True)
         try:
             if pending.clue:
                 self._cache.add_semantic(

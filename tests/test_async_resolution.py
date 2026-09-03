@@ -584,6 +584,39 @@ class AsyncResolutionTests(unittest.TestCase):
             ["One-Punch Man", "Dragon Ball Z"],
         )
 
+    def test_solver_answers_are_spelled_the_way_the_bot_reveals_them(self) -> None:
+        signature = "round:anime_title:7/10"
+        fingerprint = "text:steins"
+        round_token = "session-1:round-7:7/10"
+        app, state = make_async_app(signature, fingerprint, round_token)
+
+        class Catalog:
+            def _canonicalize(self, answer):
+                table = {"steins gate": "Steins Gate", "dan da dan": "Dandadan"}
+                key = " ".join(
+                    "".join(ch if ch.isalnum() else " " for ch in answer.casefold()).split()
+                )
+                canonical = table.get(key)
+                return (canonical, True) if canonical else (answer, False)
+
+            _knowledge = None
+
+        app._novel = Catalog()
+        app._accept_resolution_result(
+            ProviderResolution(
+                key=state.request.key,
+                provider="qwen",
+                source="antigravity-account",
+                answer="Steins;Gate",
+                confidence=0.99,
+                elapsed_ms=3000.0,
+                alternatives=("DAN DA DAN",),
+            )
+        )
+        self.assertEqual(
+            [task.answer for task in app._dispatcher.tasks], ["Steins Gate", "Dandadan"]
+        )
+
     def test_duplicate_answers_across_providers_are_queued_once(self) -> None:
         signature = "round:character:5/10"
         fingerprint = "text:same"
