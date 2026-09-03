@@ -218,5 +218,41 @@ class AntigravityProviderTests(unittest.TestCase):
                 validate_config(replace(config, antigravity=installed))
 
 
+
+class AnswerBudgetTests(unittest.TestCase):
+    """The solver budget must cover the real Anime Soul answer window.
+
+    On 2026-09-03 07:00 the three unanswered rounds (Princess Mononoke, Blue
+    Period, Solo Leveling) each abstained exactly 12.0 s after the card
+    appeared: they were the old budget expiring, not the model declining. The
+    same clues answered in 5-22 s when given room, and the card stays green for
+    about 60 s, so a 12 s budget silently discarded winnable rounds.
+    """
+
+    def test_default_budget_covers_a_slow_clue(self) -> None:
+        self.assertGreaterEqual(AntigravityConfig().total_timeout_seconds, 25.0)
+
+    def test_budget_stays_inside_the_answer_window(self) -> None:
+        config = AntigravityConfig()
+        self.assertLessEqual(config.total_timeout_seconds, 45.0)
+
+    def test_a_budget_past_the_answer_window_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "agy.exe"
+            executable.write_bytes(b"versioned signed CLI fixture")
+            config = load_config("config.example.json")
+            # The budget rule only applies to an enabled, installed provider.
+            too_long = replace(
+                config.antigravity,
+                enabled=True,
+                executable=executable,
+                total_timeout_seconds=46.0,
+            )
+            with patch(
+                "anime_trivia_automation.config._is_valid_google_signed_executable",
+                return_value=True,
+            ), self.assertRaisesRegex(ValueError, "cannot exceed 45 seconds"):
+                validate_config(replace(config, antigravity=too_long))
+
 if __name__ == "__main__":
     unittest.main()

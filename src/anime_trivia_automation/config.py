@@ -299,7 +299,14 @@ class AntigravityConfig:
     model_slug: str = "gemini-3.8-flash-low"
     working_root: Path = Path("runtime/antigravity")
     preflight_timeout_seconds: float = 8.0
-    total_timeout_seconds: float = 8.0
+    # Anime Soul keeps answers open for about 60 s after the card turns green.
+    # A 12 s budget threw away all three unanswered rounds on 2026-09-03 07:00
+    # (Princess Mononoke, Blue Period, Solo Leveling): each one abstained
+    # exactly 12.0 s after RED, and the same clues answered in 5-22 s when given
+    # room. A late answer is never posted into a closed round -- the green gate
+    # and the stale-round discard already enforce that -- so the only cost of a
+    # longer budget is a CLI call that outlives a round somebody else won.
+    total_timeout_seconds: float = 30.0
     min_confidence: float = 0.75
     max_answer_characters: int = 96
     max_clue_characters: int = 2000
@@ -768,7 +775,7 @@ def load_config(path: str | Path) -> AppConfig:
             antigravity_raw.get("preflight_timeout_seconds", 8.0)
         ),
         total_timeout_seconds=float(
-            antigravity_raw.get("total_timeout_seconds", 8.0)
+            antigravity_raw.get("total_timeout_seconds", 30.0)
         ),
         min_confidence=float(
             antigravity_raw.get("min_confidence", 0.75)
@@ -1111,9 +1118,11 @@ def validate_config(config: AppConfig) -> None:
             raise ValueError(
                 "antigravity.preflight_timeout_seconds cannot exceed 30 seconds"
             )
-        if config.antigravity.total_timeout_seconds > 15.0:
+        # Stay inside the ~60 s answer window: a budget beyond that could hold a
+        # round open past its own close, and the round is the real deadline.
+        if config.antigravity.total_timeout_seconds > 45.0:
             raise ValueError(
-                "antigravity.total_timeout_seconds cannot exceed 15 seconds"
+                "antigravity.total_timeout_seconds cannot exceed 45 seconds"
             )
         if not 0.0 <= config.antigravity.min_confidence <= 1.0:
             raise ValueError(
