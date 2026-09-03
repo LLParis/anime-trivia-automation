@@ -327,6 +327,15 @@ class TypingConfig:
     enabled: bool = True
     expected_process_names: tuple[str, ...] = ("Discord.exe",)
     expected_window_title_contains: str = "Discord"
+    # Deliberately zero. A pause was added and reverted on 2026-09-03: the
+    # reasoning was that a 0.2 s answer looks inhuman, but 0.2 s is only our
+    # local green-to-Enter measurement. The bot's own clock already carries the
+    # ~0.7 s our detection trails the server, and it credited us at 0.9 s and
+    # 1.7 s, which are ordinary human times. Nobody ever saw 0.2 s. The real
+    # tells the room named were the breadth of what we know and the formality
+    # of the answers ("no way you get entire name"), neither of which a delay
+    # fixes, and waiting would have conceded the 1.2-1.4 s cluster where human
+    # wins bunch up.
     pre_delay_seconds: tuple[float, float] = (0.0, 0.0)
     key_delay_seconds: tuple[float, float] = (0.012, 0.028)
     draft_while_locked: bool = True
