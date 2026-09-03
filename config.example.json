@@ -226,6 +226,7 @@
     "scene_retry_limit": 1,
     "log_level": "INFO",
     "ledger_path": "runtime/round_ledger.jsonl",
-    "log_dir": "runtime/logs"
+    "log_dir": "runtime/logs",
+    "operator_display_name": ""
   }
 }

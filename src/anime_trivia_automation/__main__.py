@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .app import AnimeTriviaAutomation, inspect_image, print_inspection
 from .config import load_config
-from .report import write_quiz_report
+from .report import set_operator_name, write_quiz_report
 from .singleton import WorkerAlreadyRunningError, WorkerMutex
 from .status import NullStatus, OperatorStatus
 from .utils import configure_logging
@@ -102,6 +102,8 @@ def main() -> int:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, OSError):
             pass
+        # Lets the outcome column say whether the credited winner was us.
+        set_operator_name(config.runtime.operator_display_name)
         text, out = write_quiz_report(
             config.runtime.ledger_path,
             config.runtime.log_dir or config.runtime.ledger_path.parent,

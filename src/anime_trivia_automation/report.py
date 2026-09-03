@@ -39,6 +39,8 @@ class RoundReport:
     resolve_ms: float | None = None
     submitted: list[str] = field(default_factory=list)
     submit_detail: str = ""
+    credited_to: str = ""
+    credited_seconds: float | None = None
     enter_attempted: bool = False
     reveal: str = ""
     last_phase: str = ""
@@ -49,6 +51,14 @@ class RoundReport:
     def outcome(self) -> str:
         if self.enter_attempted and not self.submitted:
             return "UNCONFIRMED (Enter sent, delivery not acknowledged)"
+        if self.submitted and self.credited_to and OPERATOR_NAME:
+            # The bot names the winner. Matching the reveal is not winning.
+            if normalize_question(self.credited_to) == normalize_question(OPERATOR_NAME):
+                return f"WON in {self.credited_seconds or 0:.1f}s"
+            return (
+                f"LOST the race to {self.credited_to} "
+                f"({self.credited_seconds or 0:.1f}s)"
+            )
         if self.submitted:
             unconfirmed = "did not clear" in self.submit_detail or "not retry" in self.submit_detail
             if unconfirmed:
@@ -72,6 +82,16 @@ class RoundReport:
                 return f"HAD IT, {reason}"
             return reason
         return _TERMINAL_REASONS.get(self.last_phase, "not resolved")
+
+
+# Set from config before rendering, so the outcome column can say whether the
+# credited winner was us.
+OPERATOR_NAME = ""
+
+
+def set_operator_name(name: str) -> None:
+    global OPERATOR_NAME
+    OPERATOR_NAME = (name or "").strip()
 
 
 def load_rounds(ledger_path: Path) -> list[RoundReport]:
@@ -148,6 +168,14 @@ def load_rounds(ledger_path: Path) -> list[RoundReport]:
                     item.submit_detail = detail
             elif phase == "LEARNED":
                 item.reveal = answer
+                credited = str(row.get("credited") or "")
+                if "|" in credited:
+                    winner, _, seconds = credited.partition("|")
+                    item.credited_to = winner
+                    try:
+                        item.credited_seconds = float(seconds)
+                    except ValueError:
+                        item.credited_seconds = None
             if phase not in {"LEARNED", "CLOSED"} or not item.last_phase:
                 item.last_phase = phase
                 item.last_detail = detail
@@ -208,4 +236,10 @@ def write_quiz_report(ledger_path: Path, out_dir: Path, *, runs: int = 1) -> tup
     return text, out
 
 
-__all__ = ["RoundReport", "load_rounds", "render_report", "write_quiz_report"]
+__all__ = [
+    "RoundReport",
+    "load_rounds",
+    "render_report",
+    "set_operator_name",
+    "write_quiz_report",
+]

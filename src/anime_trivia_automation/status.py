@@ -346,6 +346,7 @@ class OperatorStatus:
         increment: str | None = None,
         decrement: str | None = None,
         new_round: bool = False,
+        credited: str | None = None,
     ) -> None:
         if not self.enabled:
             return
@@ -366,6 +367,9 @@ class OperatorStatus:
                     "source": source,
                     "readiness": readiness,
                     "event_id": event_id,
+                    # Who the quiz bot credited for this round, and how fast.
+                    # Matching the reveal is not the same as winning it.
+                    "credited": credited,
                     "deduplicated": deduplicated,
                 }
             )

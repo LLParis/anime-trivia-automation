@@ -196,5 +196,63 @@ class LiveProbeTests(unittest.TestCase):
         self.assertAlmostEqual(executor._config.composer_settle_timeout_seconds, 1.5)
 
 
+
+class WinVersusRightTests(unittest.TestCase):
+    """The report must not call a lost race a win.
+
+    On 2026-09-03 12:00 round 7 was sent correctly and a human still took it in
+    0.7s, yet the table read "CORRECT (sent)". The bot names the winner in its
+    reveal, so the report can say which it was.
+    """
+
+    def _round(self, credited: str, sent: str = "my hero academia"):
+        import tempfile
+
+        from anime_trivia_automation.report import load_rounds, set_operator_name
+
+        rows = [
+            {"run_id": "r", "phase": "RED", "question": "7/10", "monotonic": 1.0,
+             "event_id": "session-1:round-7:a", "ts": "2026-09-03T19:03:44+00:00"},
+            {"run_id": "r", "phase": "NOVEL", "question": "7/10", "answer": "My Hero Academia",
+             "source": "antigravity", "monotonic": 4.0, "event_id": "session-1:round-7:a"},
+            {"run_id": "r", "phase": "SUBMITTED", "question": "7/10", "answer": sent,
+             "detail": "sent", "monotonic": 5.0, "event_id": "session-1:round-7:a"},
+            {"run_id": "r", "phase": "LEARNED", "question": "7/10",
+             "answer": "My Hero Academia", "credited": credited,
+             "monotonic": 6.0, "event_id": "session-1:round-7:learned"},
+        ]
+        self._tmp = tempfile.TemporaryDirectory()
+        ledger = Path(self._tmp.name) / "l.jsonl"
+        ledger.write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+        )
+        set_operator_name("チェンスモカのヤギ")
+        return load_rounds(ledger)[0]
+
+    def tearDown(self) -> None:
+        tmp = getattr(self, "_tmp", None)
+        if tmp is not None:
+            tmp.cleanup()
+        from anime_trivia_automation.report import set_operator_name
+
+        set_operator_name("")
+
+    def test_a_race_lost_to_someone_else_is_reported_as_lost(self) -> None:
+        outcome = self._round("BJERKE|0.7").outcome
+        self.assertIn("LOST", outcome)
+        self.assertIn("BJERKE", outcome)
+        self.assertIn("0.7", outcome)
+
+    def test_a_race_we_won_is_reported_as_won(self) -> None:
+        outcome = self._round("チェンスモカのヤギ|1.7").outcome
+        self.assertIn("WON", outcome)
+        self.assertIn("1.7", outcome)
+
+    def test_without_a_credit_the_old_verdict_still_applies(self) -> None:
+        # A round nobody won carries no credit line; fall back to matching.
+        outcome = self._round("").outcome
+        self.assertNotIn("LOST", outcome)
+        self.assertIn("CORRECT", outcome)
+
 if __name__ == "__main__":
     unittest.main()

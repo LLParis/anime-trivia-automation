@@ -1931,6 +1931,37 @@ class AnimeTriviaAutomation:
                 )
         return records
 
+    def _reveal_credit(self, answer: str) -> str | None:
+        """Who the bot credited for the round we just learned, and how fast.
+
+        Read once the round has closed, so this never competes with answering.
+        Sending the right answer is not the same as winning: on 2026-09-03 12:00
+        round 7 was sent correctly and a human still took it in 0.7s, which the
+        report had no way to show.
+        """
+
+        guard = getattr(self, "_foreground_guard", None)
+        locator = getattr(self, "_question_locator", None)
+        if guard is None or locator is None:
+            return None
+        window = guard.expected_window()
+        if window is None:
+            return None
+        try:
+            records = locator.find_reveal_records(window.hwnd, window.process_id)
+        except Exception:
+            LOGGER.debug("Could not read the reveal credit", exc_info=True)
+            return None
+        wanted = normalize_question(answer)
+        for record in records:
+            if normalize_question(record.answer) != wanted:
+                continue
+            credit = locator.parse_reveal_credit(record.identity)
+            if credit is not None:
+                winner, seconds = credit
+                return f"{winner}|{seconds}"
+        return None
+
     def _semantic_reveal_records(self) -> list[tuple[str, str, str, int]]:
         """Read official loaded bot answers directly from Discord accessibility."""
 
@@ -2192,8 +2223,10 @@ class AnimeTriviaAutomation:
         learned_token = self._active_status_token or (
             f"session-{self._status_session_id}:{pending.signature}"
         )
+        credited = self._reveal_credit(answer)
         self._status.emit(
             "LEARNED",
+            credited=credited,
             title=f"Learned — {pending.question_label}",
             detail="The bot reveal is now a verified local fast-path answer",
             question=pending.question_label,

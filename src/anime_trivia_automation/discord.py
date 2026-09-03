@@ -304,6 +304,31 @@ class DiscordQuestionLocator(DiscordComposerLocator):
         answer = " ".join(match.group(1).split()).strip()
         return answer or None
 
+    _CREDIT_PATTERN = re.compile(
+        r"correct!?\s*@?(.+?)\s+got it in\s+([\d.]+)\s*s\b",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    @classmethod
+    def parse_reveal_credit(cls, accessible_name: str) -> tuple[str, float] | None:
+        """Who the bot credited for a round, and how fast they were.
+
+        The reveal reads "Correct! @someone got it in 1.7s — the answer was X".
+        Without this, a report can only say our answer matched the reveal, which
+        is not the same as winning: on 2026-09-03 12:00 we sent the right answer
+        for round 7 and a human still took it at 0.7s.
+        """
+
+        match = cls._CREDIT_PATTERN.search(accessible_name)
+        if match is None:
+            return None
+        winner = " ".join(match.group(1).split()).strip(" @·—-")
+        try:
+            seconds = float(match.group(2))
+        except ValueError:
+            return None
+        return (winner, seconds) if winner else None
+
     @classmethod
     def is_official_reveal_name(cls, accessible_name: str) -> bool:
         folded = accessible_name.casefold()

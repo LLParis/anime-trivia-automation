@@ -395,6 +395,11 @@ class RuntimeConfig:
     save_prompt_crops: bool = False
     scene_retry_limit: int = 1
     log_level: str = "INFO"
+    # The Discord display name the quiz bot credits when we win. Without it a
+    # report can only say our answer matched the reveal, which is not the same
+    # as being first: on 2026-09-03 12:00 we sent the right answer for round 7
+    # and a human still took it at 0.7s.
+    operator_display_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -839,6 +844,9 @@ def load_config(path: str | Path) -> AppConfig:
         save_prompt_crops=bool(runtime_raw.get("save_prompt_crops", False)),
         scene_retry_limit=int(runtime_raw.get("scene_retry_limit", 1)),
         log_level=str(runtime_raw.get("log_level", "INFO")).upper(),
+        operator_display_name=str(
+            runtime_raw.get("operator_display_name", "")
+        ).strip(),
     )
 
     config = AppConfig(
