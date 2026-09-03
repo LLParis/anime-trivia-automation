@@ -1,22 +1,23 @@
-"""Harvest every past Anime Soul round from the Discord channel scrollback.
+"""Harvest past Anime Soul rounds from the Discord channel scrollback.
 
 A history hit resolves in about 0.5 s; the live solver takes about 6 s and only
 returns after answers have already opened. So every clue that lands in
-``data/trivia_history.seed.json`` converts a future repeat into a race we win on
-write speed alone -- and an emoji rebus we could never solve becomes a plain
-lookup. On 2026-09-03 all ten clues were novel; the channel holds months more.
+``data/trivia_history.seed.json`` converts a future repeat into a race won on
+write speed alone -- and an emoji rebus the model cannot solve becomes a plain
+lookup. All ten clues on 2026-09-03 were novel; the channel holds months more.
 
 This walks the message list through the SAME accessibility tree the live app
-reads, reusing ``DiscordQuestionLocator``'s card and reveal parsers so a clue
+reads, reusing ``DiscordQuestionLocator``'s card and reveal parsers, so a clue
 harvested here is byte-identical to one captured live (emoji included).
 
-READ ONLY, by construction: it scrolls the message list via UI Automation and
-reads names. It never touches the composer, never types, never posts, and never
-clicks -- so it cannot send anything to the channel.
+READ ONLY by construction: it scrolls the message list via UI Automation and
+reads accessible names. It never touches the composer, never types, and never
+clicks, so it cannot send anything to the channel. It restores the channel to
+the newest message when it finishes.
 
-    .venv\\Scripts\\python.exe scripts\\harvest_channel_history.py --rounds 400
+    .venv\\Scripts\\python.exe scripts\\harvest_channel_history.py --dry-run
 
-Leave Discord on the trivia channel and don't scroll it while this runs.
+Keep Discord shown on the trivia channel and don't scroll it while this runs.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import re
 import subprocess
 import sys
 import time
@@ -38,12 +40,16 @@ from anime_trivia_automation.discord import DiscordQuestionLocator  # noqa: E402
 from anime_trivia_automation.typing import ForegroundWindowGuard  # noqa: E402
 from anime_trivia_automation.utils import normalize_question  # noqa: E402
 
+# Every Discord message row's accessible name carries its own timestamp. That
+# is what separates a real message from a sidebar entry, and it is how the walk
+# knows scrolling is still making progress through ordinary conversation.
+_MESSAGE_STAMP = re.compile(r"\d{1,2}:\d{2}\s*(?:AM|PM)", re.IGNORECASE)
+
 
 @dataclass
 class Row:
-    """One message row: either a card or a bot reveal, in document order."""
+    """One trivia row: either a bot card or a bot reveal."""
 
-    order: int
     name: str
     kind: str  # "card" | "reveal"
     clue: str = ""
@@ -52,85 +58,90 @@ class Row:
     answer: str = ""
 
 
-def _rows(locator: DiscordQuestionLocator, hwnd: int, process_id: int) -> list[Row]:
-    """Every card and reveal currently materialized in the virtualized list.
+@dataclass
+class Scan:
+    """One pass over the materialized message list."""
 
-    Offscreen rows are kept: Discord renders a band above and below the
-    viewport, and those rows carry exactly the same accessible names. Ordering
-    is by vertical position so a reveal that follows a card stays after it.
+    message_names: list[str]
+    rows: list[Row]
+    total_list_items: int
+    top_element: Any = None
+    bottom_element: Any = None
+
+
+def scan(locator: DiscordQuestionLocator, target: Any) -> Scan:
+    """Read the virtualized list once: messages, trivia rows, and the extremes.
+
+    Offscreen rows are kept: Discord materializes a band above and below the
+    viewport and those rows carry identical accessible names. Trivia rows are
+    ordered by vertical position so a reveal that follows a card stays after it.
     """
 
     automation, uia_types = locator._client()
-    root = automation.ElementFromHandle(hwnd)
+    root = automation.ElementFromHandle(target.hwnd)
     condition = automation.CreatePropertyCondition(
         uia_types.UIA_ControlTypePropertyId,
         uia_types.UIA_ListItemControlTypeId,
     )
     elements = root.FindAll(uia_types.TreeScope_Descendants, condition)
-    found: list[tuple[int, int, Row]] = []
+    messages: list[str] = []
+    placed: list[tuple[int, int, Row]] = []
+    top_element = bottom_element = None
+    top_at = bottom_at = None
     for index in range(elements.Length):
         element = elements.GetElement(index)
         try:
-            if int(element.CurrentProcessId) != process_id:
+            if int(element.CurrentProcessId) != target.process_id:
                 continue
             name = str(element.CurrentName or "")
+            top = int(element.CurrentBoundingRectangle.top)
         except Exception:
             continue
         if not name:
             continue
-        try:
-            top = int(element.CurrentBoundingRectangle.top)
-        except Exception:
-            top = index
+        is_message = bool(_MESSAGE_STAMP.search(name))
+        if is_message:
+            messages.append(name)
+            if top_at is None or top < top_at:
+                top_at, top_element = top, element
+            if bottom_at is None or top > bottom_at:
+                bottom_at, bottom_element = top, element
         if "Anime Guessing Game" in name:
             try:
-                full = locator._message_group_name(element, automation, uia_types) or name
+                full = (
+                    locator._message_group_name(element, automation, uia_types) or name
+                )
             except Exception:
                 full = name
             card = locator.parse_card_name(full)
             if card is None:
                 continue
             clue, answer_type, label = card
-            found.append(
-                (top, index, Row(index, full, "card", clue, answer_type, label))
+            placed.append(
+                (top, index, Row(full, "card", clue, answer_type, label))
             )
-            continue
-        if locator.is_official_reveal_name(name):
+        elif locator.is_official_reveal_name(name):
             answer = locator.parse_reveal_answer(name)
             if answer:
-                found.append((top, index, Row(index, name, "reveal", answer=answer)))
-    found.sort(key=lambda item: (item[0], item[1]))
-    return [row for _, _, row in found]
-
-
-def _scroll_extreme(
-    locator: DiscordQuestionLocator, hwnd: int, process_id: int, *, oldest: bool
-) -> bool:
-    """Scroll the top-most (oldest) or bottom-most (newest) row into view."""
-
-    automation, uia_types = locator._client()
-    root = automation.ElementFromHandle(hwnd)
-    condition = automation.CreatePropertyCondition(
-        uia_types.UIA_ControlTypePropertyId,
-        uia_types.UIA_ListItemControlTypeId,
+                placed.append((top, index, Row(name, "reveal", answer=answer)))
+    placed.sort(key=lambda item: (item[0], item[1]))
+    return Scan(
+        message_names=messages,
+        rows=[row for _, _, row in placed],
+        total_list_items=int(elements.Length),
+        top_element=top_element,
+        bottom_element=bottom_element,
     )
-    elements = root.FindAll(uia_types.TreeScope_Descendants, condition)
-    best = None
-    best_top = None
-    for index in range(elements.Length):
-        element = elements.GetElement(index)
-        try:
-            if int(element.CurrentProcessId) != process_id:
-                continue
-            top = int(element.CurrentBoundingRectangle.top)
-        except Exception:
-            continue
-        if best_top is None or (top < best_top if oldest else top > best_top):
-            best_top, best = top, element
-    if best is None:
+
+
+def scroll_to(locator: DiscordQuestionLocator, element: Any) -> bool:
+    """Bring one already-located row into view. No mouse, no keys, no clicks."""
+
+    if element is None:
         return False
+    _automation, uia_types = locator._client()
     try:
-        best.GetCurrentPattern(uia_types.UIA_ScrollItemPatternId).QueryInterface(
+        element.GetCurrentPattern(uia_types.UIA_ScrollItemPatternId).QueryInterface(
             uia_types.IUIAutomationScrollItemPattern
         ).ScrollIntoView()
         return True
@@ -138,33 +149,27 @@ def _scroll_extreme(
         return False
 
 
-def restore_to_newest(
-    locator: DiscordQuestionLocator,
-    hwnd: int,
-    process_id: int,
-    *,
-    settle: float,
-    limit: int = 400,
-) -> None:
-    """Leave the channel where the operator had it: at the newest message.
+def pair_rounds(rows: list[Row]) -> list[dict]:
+    """Pair each card with the first reveal posted after it."""
 
-    The live app reads the newest visible card, so a channel left scrolled into
-    history would blind it. Mirror of the harvest walk, downward.
-    """
-
-    seen: set[str] = set()
-    barren = 0
-    for _ in range(limit):
-        rows = _rows(locator, hwnd, process_id)
-        fresh = [r.name for r in rows if r.name not in seen]
-        seen.update(r.name for r in rows)
-        barren = barren + 1 if not fresh else 0
-        if barren >= 3:
+    paired: list[dict] = []
+    for position, row in enumerate(rows):
+        if row.kind != "card":
+            continue
+        for later in rows[position + 1:]:
+            if later.kind == "card":
+                break  # a new card started; this one's reveal is not in view
+            paired.append(
+                {
+                    "clue": row.clue,
+                    "type": row.answer_type,
+                    "answer": later.answer,
+                    "question_label": row.question_label,
+                    "reveal_name": later.name,
+                }
+            )
             break
-        if not _scroll_extreme(locator, hwnd, process_id, oldest=False):
-            break
-        time.sleep(settle)
-    print("channel restored to the newest messages", flush=True)
+    return paired
 
 
 def _live_app_running() -> bool:
@@ -183,163 +188,151 @@ def _live_app_running() -> bool:
     return "anime-trivia.exe" in output
 
 
-def _list_item_count(locator: DiscordQuestionLocator, target: Any) -> int:
-    """How many list rows exist at all, to tell 'suspended' from 'empty'."""
+def walk(
+    locator: DiscordQuestionLocator,
+    target: Any,
+    *,
+    oldest: bool,
+    steps: int,
+    settle: float,
+    known: set[tuple[str, str]] | None = None,
+    harvested: dict[tuple[str, str], dict] | None = None,
+    want: int = 0,
+    label: str = "",
+) -> int:
+    """Scroll one direction, collecting clue/answer pairs on the way.
 
-    try:
-        automation, uia_types = locator._client()
-        root = automation.ElementFromHandle(target.hwnd)
-        condition = automation.CreatePropertyCondition(
-            uia_types.UIA_ControlTypePropertyId,
-            uia_types.UIA_ListItemControlTypeId,
-        )
-        return int(root.FindAll(uia_types.TreeScope_Descendants, condition).Length)
-    except Exception:
-        return 0
+    Progress is judged by NEW MESSAGE rows, not by trivia rows: most of the
+    channel is ordinary conversation, and a card-only test would call a
+    perfectly good scroll barren and stop early.
+    """
 
-
-def pair_rounds(rows: list[Row]) -> list[dict]:
-    """Pair each card with the first reveal posted after it."""
-
-    paired: list[dict] = []
-    for position, row in enumerate(rows):
-        if row.kind != "card":
-            continue
-        for later in rows[position + 1:]:
-            if later.kind == "card":
-                break  # a new card started; this one was never revealed here
-            if later.kind == "reveal":
-                paired.append(
-                    {
-                        "clue": row.clue,
-                        "type": row.answer_type,
-                        "answer": later.answer,
-                        "question_label": row.question_label,
-                        "reveal_name": later.name,
-                    }
-                )
-                break
-    return paired
+    seen_messages: set[str] = set()
+    barren = 0
+    for step in range(1, steps + 1):
+        current = scan(locator, target)
+        fresh = [n for n in current.message_names if n not in seen_messages]
+        seen_messages.update(current.message_names)
+        added = 0
+        pairs = 0
+        cards = sum(1 for r in current.rows if r.kind == "card")
+        if known is not None and harvested is not None:
+            for pair in pair_rounds(current.rows):
+                pairs += 1
+                key = (normalize_question(pair["clue"]), pair["type"])
+                if key in known or key in harvested:
+                    continue
+                harvested[key] = pair
+                added += 1
+        if label:
+            print(
+                f"[{label} {step:3}/{steps}] messages={len(current.message_names):3} "
+                f"new={len(fresh):3} cards={cards:2} reveals={len(current.rows) - cards:2} "
+                f"paired={pairs:2} new_clues={added:2} total_new={len(harvested or {})}",
+                flush=True,
+            )
+        if want and harvested is not None and len(harvested) >= want:
+            print("reached the requested round count", flush=True)
+            return len(harvested)
+        barren = barren + 1 if not fresh else 0
+        if barren >= 4:
+            print(f"{label or 'walk'}: no new messages after four scrolls", flush=True)
+            break
+        element = current.top_element if oldest else current.bottom_element
+        if not scroll_to(locator, element):
+            print(f"{label or 'walk'}: could not scroll further", flush=True)
+            break
+        time.sleep(settle)
+    return len(harvested or {})
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="config.json")
+    parser.add_argument("--rounds", type=int, default=400, help="stop after this many new pairs")
+    parser.add_argument("--max-scrolls", type=int, default=600, help="hard ceiling; always terminates")
+    parser.add_argument("--settle", type=float, default=0.45, help="seconds to let Discord render")
+    parser.add_argument("--dry-run", action="store_true", help="report without writing history")
     parser.add_argument(
-        "--rounds",
-        type=int,
-        default=400,
-        help="stop after this many newly harvested clue/answer pairs",
-    )
-    parser.add_argument(
-        "--max-scrolls",
-        type=int,
-        default=600,
-        help="hard ceiling on scroll steps so this always terminates",
-    )
-    parser.add_argument(
-        "--settle",
-        type=float,
-        default=0.45,
-        help="seconds to let Discord render after each scroll step",
-    )
-    parser.add_argument(
-        "--dry-run",
+        "--include-known",
         action="store_true",
-        help="report what would be added without writing history",
+        help="also list pairs already in history, to prove the pairing works",
     )
     args = parser.parse_args()
 
     config = load_config(args.config)
-    guard = ForegroundWindowGuard(config.typing)
-    target = guard.expected_window()
+    target = ForegroundWindowGuard(config.typing).expected_window()
     if target is None:
-        print(
-            "Discord was not found. Open Discord on the trivia channel and retry.",
-            file=sys.stderr,
-        )
+        print("Discord was not found. Open it on the trivia channel.", file=sys.stderr)
         return 2
     locator = DiscordQuestionLocator()
 
-    # Refuse to run alongside the live app: harvesting scrolls the channel into
-    # history, which would blind the app's newest-card read mid-quiz.
+    # Harvesting scrolls the channel into history, which would blind the live
+    # app's newest-card read mid-quiz.
     if _live_app_running():
         print(
-            "anime-trivia is running. Stop it (F12) before harvesting: scrolling "
-            "the channel into history would blind the live card read.",
+            "anime-trivia is running. Stop it (F12) first: scrolling the channel "
+            "into history would blind the live card read.",
+            file=sys.stderr,
+        )
+        return 2
+    if ctypes.windll.user32.IsIconic(target.hwnd):
+        print(
+            "Discord is minimized, so Electron is not rendering the message list. "
+            "Bring it up on the trivia channel and run this again.",
             file=sys.stderr,
         )
         return 2
 
-    # Electron suspends the virtualized message list when the window is
-    # minimized or hidden: the accessibility tree then holds only the channel
-    # sidebar. Say so plainly instead of reporting "nothing to harvest".
-    if ctypes.windll.user32.IsIconic(target.hwnd):
+    probe = scan(locator, target)
+    if not probe.message_names:
         print(
-            "Discord is minimized, so it is not rendering the message list. "
-            "Bring Discord up on the trivia channel and run this again.",
+            f"Discord's message list is not readable ({probe.total_list_items} list "
+            "rows, none of them messages). Show the Discord window on the trivia "
+            "channel and run this again.",
             file=sys.stderr,
         )
         return 2
-    probe = _rows(locator, target.hwnd, target.process_id)
-    if not probe:
-        print(
-            f"Discord's message list is not readable ({_list_item_count(locator, target)} "
-            "rows found, none of them messages). Bring the Discord window to the "
-            "front on the trivia channel and run this again; Electron only renders "
-            "the message list while the window is shown.",
-            file=sys.stderr,
-        )
-        return 2
-    print(f"message list is readable: {len(probe)} card/reveal rows visible", flush=True)
+    print(
+        f"message list readable: {len(probe.message_names)} messages, "
+        f"{len(probe.rows)} trivia rows in view",
+        flush=True,
+    )
 
     history_path = config.runtime.history_path
     history = json.loads(history_path.read_text(encoding="utf-8"))
-    known = {
-        (normalize_question(p["clue"]), p.get("type") or "")
-        for p in history["pairs"]
-    }
+    known = (
+        set()
+        if args.include_known
+        else {
+            (normalize_question(p["clue"]), p.get("type") or "")
+            for p in history["pairs"]
+        }
+    )
     before = len(history["pairs"])
     print(f"history starts with {before} clues", flush=True)
 
     harvested: dict[tuple[str, str], dict] = {}
-    seen_names: set[str] = set()
-    barren = 0
-
-    for step in range(1, args.max_scrolls + 1):
-        rows = _rows(locator, target.hwnd, target.process_id)
-        fresh_names = [r.name for r in rows if r.name not in seen_names]
-        seen_names.update(r.name for r in rows)
-        added_this_step = 0
-        for pair in pair_rounds(rows):
-            key = (normalize_question(pair["clue"]), pair["type"])
-            if key in known or key in harvested:
-                continue
-            harvested[key] = pair
-            added_this_step += 1
-        print(
-            f"[{step:3}/{args.max_scrolls}] rows={len(rows):3} new_messages={len(fresh_names):3} "
-            f"new_clues={added_this_step:2} total_new={len(harvested)}",
-            flush=True,
-        )
-        if len(harvested) >= args.rounds:
-            print("reached the requested round count", flush=True)
-            break
-        # Two consecutive steps with no new message at all means the scroll is
-        # not moving (top of channel, or Discord stopped virtualizing).
-        barren = barren + 1 if not fresh_names else 0
-        if barren >= 3:
-            print("no new messages after three scrolls; stopping", flush=True)
-            break
-        if not _scroll_extreme(
-            locator, target.hwnd, target.process_id, oldest=True
-        ):
-            print("could not scroll any further; stopping", flush=True)
-            break
-        time.sleep(args.settle)
-
-    restore_to_newest(
-        locator, target.hwnd, target.process_id, settle=args.settle
+    walk(
+        locator,
+        target,
+        oldest=True,
+        steps=args.max_scrolls,
+        settle=args.settle,
+        known=known,
+        harvested=harvested,
+        want=args.rounds,
+        label="up",
+    )
+    # Leave the channel where the operator had it: the live app reads the newest
+    # visible card, so a channel parked in history would blind it.
+    walk(
+        locator,
+        target,
+        oldest=False,
+        steps=args.max_scrolls,
+        settle=args.settle,
+        label="back",
     )
 
     raw_path = Path("runtime") / "harvest_raw.json"
@@ -349,11 +342,19 @@ def main() -> int:
         encoding="utf-8",
     )
     print(f"\n{len(harvested)} new clue/answer pairs -> {raw_path}", flush=True)
-    for pair in list(harvested.values())[:15]:
-        print(f"  {pair['type']:12} {pair['clue'][:56]!r:60} -> {pair['answer']}")
-    if len(harvested) > 15:
-        print(f"  ... and {len(harvested) - 15} more")
+    for pair in list(harvested.values())[:20]:
+        print(f"  {pair['type']:12} {pair['clue'][:52]!r:56} -> {pair['answer']}")
+    if len(harvested) > 20:
+        print(f"  ... and {len(harvested) - 20} more")
 
+    if args.include_known:
+        # This mode zeroes the known-set to demonstrate pairing, so everything
+        # it reports is already in history. Writing would duplicate all of it.
+        print(
+            "\ninspection run (--include-known): history not written",
+            flush=True,
+        )
+        return 0
     if args.dry_run:
         print("\ndry run: history not written", flush=True)
         return 0
@@ -361,8 +362,8 @@ def main() -> int:
         print("nothing new to add", flush=True)
         return 0
 
-    # History entries keep their three-field shape; provenance lives in the raw
-    # dump so the file the app loads stays exactly the shape it expects.
+    # History entries keep their three-field shape; provenance stays in the raw
+    # dump so the file the app loads is exactly the shape it expects.
     history["pairs"].extend(
         {"clue": p["clue"], "type": p["type"], "answer": p["answer"]}
         for p in harvested.values()
@@ -370,10 +371,7 @@ def main() -> int:
     history_path.write_text(
         json.dumps(history, indent=1, ensure_ascii=False), encoding="utf-8"
     )
-    print(
-        f"history {before} -> {len(history['pairs'])} clues ({history_path})",
-        flush=True,
-    )
+    print(f"history {before} -> {len(history['pairs'])} clues", flush=True)
     return 0
 
 
