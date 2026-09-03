@@ -231,6 +231,7 @@ class PromptExtractor:
                 detected_at=scene.detected_at,
                 mean_delta=scene.mean_delta,
                 changed_ratio=scene.changed_ratio,
+                origin=(scene.origin[0] + left, scene.origin[1] + top),
             ),
             True,
         )
@@ -306,7 +307,7 @@ class PromptExtractor:
             selected_card_bottom,
         )
         full_text = " ".join(line.text for line in card_lines)
-        readiness, red_pixels, green_pixels = self._detect_readiness(
+        readiness, red_pixels, green_pixels, readiness_strip = self._detect_readiness(
             frame,
             card_lines,
             header,
@@ -422,6 +423,7 @@ class PromptExtractor:
             green_outline_pixels=green_pixels,
             perceptual_hash=perceptual_hash,
             card_box=card_box,
+            readiness_strip=readiness_strip,
         )
 
     def _trim_visual_content(self, image: Any, np: Any) -> Any:
@@ -490,8 +492,9 @@ class PromptExtractor:
             bottom_anchor + self._readiness.search_vertical_padding,
         )
         strip = frame[top:bottom, left:right]
+        strip_box = (left, top, right, bottom)
         if strip.size == 0:
-            return "unknown", 0, 0
+            return "unknown", 0, 0, strip_box
 
         blue = strip[:, :, 0].astype(np.float32)
         green = strip[:, :, 1].astype(np.float32)
@@ -513,9 +516,9 @@ class PromptExtractor:
         state_ratio = self._readiness.state_dominance_ratio
 
         if green_pixels >= minimum and green_pixels >= red_pixels * state_ratio:
-            return "ready", red_pixels, green_pixels
+            return "ready", red_pixels, green_pixels, strip_box
         if red_pixels >= minimum and red_pixels >= green_pixels * state_ratio:
-            return "locked", red_pixels, green_pixels
+            return "locked", red_pixels, green_pixels, strip_box
 
         normalized = normalize_question(full_text)
         text_ready = any(
@@ -531,12 +534,48 @@ class PromptExtractor:
             for marker in self._readiness.closed_text_markers
         )
         if text_closed:
-            return "closed", red_pixels, green_pixels
+            return "closed", red_pixels, green_pixels, strip_box
         if self._readiness.allow_text_only_ready and text_ready and not text_locked:
-            return "ready", red_pixels, green_pixels
+            return "ready", red_pixels, green_pixels, strip_box
         if text_locked:
-            return "locked", red_pixels, green_pixels
-        return "unknown", red_pixels, green_pixels
+            return "locked", red_pixels, green_pixels, strip_box
+        return "unknown", red_pixels, green_pixels, strip_box
+
+    def classify_strip(self, strip: Any) -> str:
+        """Cheap per-frame colour class of an accent band: ready, locked, or none.
+
+        Uses the same channel thresholds as ``_detect_readiness`` but counts
+        pixels instead of running connected components, so it can run on every
+        captured frame.
+        """
+
+        if strip is None or strip.size == 0:
+            return "none"
+        blue = strip[:, :, 0].astype("int32")
+        green = strip[:, :, 1].astype("int32")
+        red = strip[:, :, 2].astype("int32")
+        ratio = self._readiness.channel_dominance_ratio
+        red_pixels = int(
+            (
+                (red >= self._readiness.red_min_channel)
+                & (red * 4 >= green * int(ratio * 4))
+                & (red * 4 >= blue * int(ratio * 4))
+            ).sum()
+        )
+        green_pixels = int(
+            (
+                (green >= self._readiness.green_min_channel)
+                & (green * 4 >= red * int(ratio * 4))
+                & (green * 4 >= blue * int(ratio * 4))
+            ).sum()
+        )
+        minimum = self._readiness.min_color_pixels
+        state_ratio = self._readiness.state_dominance_ratio
+        if green_pixels >= minimum and green_pixels >= red_pixels * state_ratio:
+            return "ready"
+        if red_pixels >= minimum and red_pixels >= green_pixels * state_ratio:
+            return "locked"
+        return "none"
 
     def _largest_outline_component(self, cv2: Any, mask: Any) -> int:
         components = self._outline_components(cv2, mask)

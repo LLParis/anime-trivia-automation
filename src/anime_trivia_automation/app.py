@@ -133,6 +133,8 @@ class AnimeTriviaAutomation:
         self._stop_lock = threading.Lock()
         self._stopped = False
         self._mailbox: LatestMailbox[Scene] = LatestMailbox()
+        # (capture-pixel strip box, last colour class, consecutive flip frames)
+        self._accent_watch: tuple[tuple[int, int, int, int], str, int] | None = None
         self._active_prompt = ActivePromptState()
         self._status_session_id = 1
         self._status_round_id = 0
@@ -406,6 +408,47 @@ class AnimeTriviaAutomation:
         )
         return artifact.group(1) if artifact is not None else clue
 
+    def _arm_accent_watch(self, observation: PromptObservation) -> None:
+        """Remember where the live card's colour band is, in capture pixels."""
+
+        strip = observation.readiness_strip
+        if observation.readiness not in {"locked", "ready"} or strip is None:
+            self._accent_watch = None
+            return
+        ox, oy = observation.scene.origin
+        left, top, right, bottom = strip
+        self._accent_watch = (
+            (left + ox, top + oy, right + ox, bottom + oy),
+            observation.readiness,
+            0,
+        )
+
+    def _watch_accent_strip(self, frame: Any, captured_at: float) -> Scene | None:
+        """Force a scene the moment the card's accent colour class flips.
+
+        Runs on the capture thread for every frame the thumbnail gate deemed
+        unchanged. Two consecutive frames must agree so a single torn frame
+        cannot open the Enter gate.
+        """
+
+        watch = self._accent_watch
+        if watch is None:
+            return None
+        (left, top, right, bottom), expected, streak = watch
+        strip = frame[top:bottom, left:right]
+        observed = self._extractor.classify_strip(strip)
+        if observed == expected or observed == "none":
+            if streak:
+                self._accent_watch = (watch[0], expected, 0)
+            return None
+        streak += 1
+        if streak < 2:
+            self._accent_watch = (watch[0], expected, streak)
+            return None
+        LOGGER.info("Accent strip flipped %s -> %s; forcing a re-read", expected, observed)
+        self._accent_watch = (watch[0], observed, 0)
+        return self._change_gate.force_scene(frame, captured_at)
+
     def _on_visual_change(self, generation: int) -> None:
         # Pause any in-progress input immediately. OCR will either revalidate
         # the same logical round (for a harmless status edit) or replace it.
@@ -415,6 +458,8 @@ class AnimeTriviaAutomation:
     def _on_frame(self, frame: Any, captured_at: float) -> None:
         try:
             scene = self._change_gate.observe(frame, captured_at)
+            if scene is None:
+                scene = self._watch_accent_strip(frame, captured_at)
             if scene is not None:
                 self._mailbox.put(scene)
                 LOGGER.debug(
@@ -513,6 +558,7 @@ class AnimeTriviaAutomation:
             )
             self._quiz_ended = False
         self._save_prompt_crop(observation)
+        self._arm_accent_watch(observation)
         # A round signature is intentionally stable across OCR edits, so a UIA
         # clue cached under that signature must never survive into this fresh
         # stable observation. Re-read Discord semantics before every lookup.

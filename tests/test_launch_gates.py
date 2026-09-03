@@ -9,7 +9,10 @@ from pathlib import Path
 from anime_trivia_automation.report import load_rounds, render_report
 from anime_trivia_automation.typing import ActivePromptState
 
-from test_live_regressions import FakeComposer, SwitchingGuard, make_executor
+try:
+    from test_live_regressions import FakeComposer, SwitchingGuard, make_executor
+except ModuleNotFoundError:  # invoked as tests.test_launch_gates
+    from tests.test_live_regressions import FakeComposer, SwitchingGuard, make_executor
 
 
 def _row(phase, question, *, answer=None, detail="", clue=None, run="run-1", mono=0.0):

@@ -581,12 +581,23 @@ class SafeKeyboardExecutor:
             return ComposerProbeResult(False, "Windows refused to raise Discord")
         try:
             started = time.perf_counter()
-            composer = self._composer_locator.find(target.hwnd, target.process_id)
-            find_ms = (time.perf_counter() - started) * 1000.0
-            if composer is None:
-                return ComposerProbeResult(
-                    False, "the #anime-chat composer was not found; open the channel", find_ms
-                )
+            composer = None
+            find_ms = 0.0
+            # Discord re-renders the editor while scrolling or switching views;
+            # one miss is not a verdict. Keep looking until the wait expires.
+            while composer is None:
+                attempt = time.perf_counter()
+                composer = self._composer_locator.find(target.hwnd, target.process_id)
+                find_ms = (time.perf_counter() - attempt) * 1000.0
+                if composer is not None:
+                    break
+                if time.monotonic() >= deadline or self._stop_event.is_set():
+                    return ComposerProbeResult(
+                        False,
+                        "the #anime-chat composer was not found; open the channel",
+                        find_ms,
+                    )
+                time.sleep(0.5)
             if composer.value() != "":
                 return ComposerProbeResult(
                     False, "the composer already holds text; clear it and relaunch", find_ms
@@ -1454,6 +1465,24 @@ class SafeKeyboardExecutor:
         if self._stop_event.wait(self._config.enter_after_open_slack_seconds):
             self._clear_or_remember(composer, answer)
             return False
+        if not self._config.press_enter:
+            LOGGER.warning(
+                "REHEARSAL: %r is typed and verified in the composer; Enter withheld",
+                answer,
+            )
+            self._status.emit(
+                "REHEARSAL",
+                title=f"Typed, Enter withheld — {task.question_label or 'Question'}",
+                detail="Rehearsal: the answer is in the composer; delete it or press Enter yourself",
+                question=task.question_label or "Question",
+                answer=answer,
+                source=task.source,
+                readiness="ready",
+                event_id=f"{event_token}:rehearsal",
+                increment="submitted",
+            )
+            self._last_owned_answer = None
+            return True
 
         def dispatch_enter_if_owned() -> bool:
             window = self._guard.current()

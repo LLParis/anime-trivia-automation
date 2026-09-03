@@ -344,6 +344,9 @@ class TypingConfig:
     # live launch and refuse to arm if it fails.
     live_probe_at_launch: bool = True
     live_probe_wait_seconds: float = 90.0
+    # Rehearsal: run the whole live path against the real composer but leave
+    # the typed answer in the box instead of pressing Enter (set by --rehearse).
+    press_enter: bool = True
 
 
 @dataclass(frozen=True)

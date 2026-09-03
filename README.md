@@ -31,6 +31,17 @@ DXcam 60 FPS physical-pixel crop
   -> learn the durable answer only from the bot's own reveal
 ```
 
+## Rehearsal: the whole live path on a real card, Enter withheld
+
+```powershell
+.\.venv\Scripts\anime-trivia.exe --config .\config.json --rehearse      # in one window
+.\.venv\Scripts\python.exe .\scripts\rehearse_live.py --config .\config.json --card "C:\path\to\red-card.png"   # in another
+```
+
+`--rehearse` runs everything the live launcher runs (solver preflight, composer probe, capture, OCR, resolution, Discord activation, composer claim, typing, verification) and stops at Enter, leaving the typed answer in the box to inspect and delete. `rehearse_live.py` paints a saved red card inside the calibrated capture region and turns its accent green after 7 s. Measured on 2026-09-02 18:45 against the real Discord composer: red card read and resolved in 0.31 s, green flip noticed in 0.68 s, answer typed and verified 0.44 s after green.
+
+An accent-strip watcher samples the live card's colour band on every captured frame and forces a re-read the moment it flips, so the green transition no longer depends on the thumbnail change gate noticing it (it did not, when only the strip changed).
+
 ## Operating rules (why four quizzes were lost, and what now prevents each)
 
 1. **Nothing is "verified" until it ran against the real Discord editor.** Unit tests use fakes that update instantly and honour every write; the real editor lags real keystrokes by about 40 ms and ignores UI Automation writes. So every live launch now runs the production writer on the live composer (types and erases `ok`, measures the lag, widens the settle window accordingly) and refuses to arm if that fails. Nothing else counts as proof of the write path.

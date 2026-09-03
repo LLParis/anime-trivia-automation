@@ -14,6 +14,9 @@ class Scene:
     detected_at: float
     mean_delta: float
     changed_ratio: float
+    # Top-left of this frame inside the full capture region (non-zero for a
+    # prelocated crop), so card geometry can be mapped back to capture pixels.
+    origin: tuple[int, int] = (0, 0)
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,8 @@ class PromptObservation:
     green_outline_pixels: int = 0
     perceptual_hash: str | None = None
     card_box: tuple[int, int, int, int] | None = None
+    # The colored-accent search band, in this observation's frame coordinates.
+    readiness_strip: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)

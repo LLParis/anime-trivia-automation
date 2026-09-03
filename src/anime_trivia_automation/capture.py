@@ -168,6 +168,28 @@ class GpuFrameChangeGate:
             changed_ratio=self._last_changed_ratio,
         )
 
+    def force_scene(self, frame: Any, captured_at: float) -> Scene:
+        """Emit a scene now for a change the thumbnail gate would not notice.
+
+        The card's accent strip flipping colour is a few thousand pixels in a
+        2.25-megapixel region, well under the thumbnail thresholds, yet it is
+        the one change that opens the answer window.
+        """
+
+        self._generation += 1
+        self._dirty = False
+        self._stable_count = 0
+        if self._on_change is not None:
+            self._on_change(self._generation)
+        return Scene(
+            generation=self._generation,
+            frame=frame.copy(),
+            captured_at=captured_at,
+            detected_at=time.monotonic(),
+            mean_delta=self._last_mean_delta,
+            changed_ratio=self._last_changed_ratio,
+        )
+
 
 class DXCapture:
     """Owns the DXcam instance and feeds copied BGR frames to the gate."""

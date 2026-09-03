@@ -60,6 +60,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow the large local VLM slow path during --inspect-image",
     )
     parser.add_argument(
+        "--rehearse",
+        action="store_true",
+        help=(
+            "Run the full live path (activation, composer claim, typing, verification) "
+            "but withhold Enter so the typed answer can be inspected and deleted"
+        ),
+    )
+    parser.add_argument(
         "--report",
         nargs="?",
         const=1,
@@ -141,6 +149,13 @@ def main() -> int:
             readiness="unknown",
         )
         try:
+            if args.rehearse:
+                from dataclasses import replace as _replace
+
+                config = _replace(config, typing=_replace(config.typing, press_enter=False))
+                logging.getLogger(__name__).warning(
+                    "REHEARSAL: answers will be typed into Discord but Enter is withheld"
+                )
             AnimeTriviaAutomation(
                 config,
                 dry_run=args.dry_run,
