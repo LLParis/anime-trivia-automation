@@ -192,6 +192,17 @@ class GeminiProvider:
 
     RATE_LIMIT_COOLDOWN_SECONDS = 300.0
 
+    def mark_unavailable(self, detail: str) -> None:
+        """Park the lane after a failed real-clue preflight."""
+
+        self._availability = GeminiAvailability(
+            phase="unavailable",
+            available=False,
+            model=self._config.primary_model,
+            detail=detail,
+            checked_at=time.time(),
+        )
+
     @property
     def rate_limited(self) -> bool:
         return time.monotonic() < self._rate_limited_until

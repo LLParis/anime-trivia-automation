@@ -31,6 +31,14 @@ DXcam 60 FPS physical-pixel crop
   -> learn the durable answer only from the bot's own reveal
 ```
 
+## Operating rules (why four quizzes were lost, and what now prevents each)
+
+1. **Nothing is "verified" until it ran against the real Discord editor.** Unit tests use fakes that update instantly and honour every write; the real editor lags real keystrokes by about 40 ms and ignores UI Automation writes. So every live launch now runs the production writer on the live composer (types and erases `ok`, measures the lag, widens the settle window accordingly) and refuses to arm if that fails. Nothing else counts as proof of the write path.
+2. **Every solver must answer a real clue at launch.** Preflighting credentials is not enough (the API key passed preflight and then rate-limited every call). Each enabled cloud lane must answer a known quote within its live deadline or it is parked, and the app refuses to arm with zero working solvers.
+3. **No gate may produce silence.** Wrong guesses are free in Anime Soul. Confidence floors, verifier passes, evidence-agreement gates, disagreement abstention, and the locked-Question-1 latch each turned a solved round into a lost one. A new gate must show, from the ledger, which lost round it would have won.
+4. **Diagnose from the ledger, not from memory.** `anime-trivia --report` prints one line per round from `runtime/round_ledger.jsonl` and names the layer where the round ended (`HAD IT, not sent: text already in composer`, `UNCONFIRMED (Enter sent, composer did not clear)`, `not resolved`). Run it after every quiz before changing anything.
+5. **Only committed, tested code runs a quiz.** The launcher warns when `src/` or `tests/` has uncommitted changes and prints the running commit. Two agents editing the tree during a quiz day is how a half-finished change that removed Enter reached a live run.
+
 ## Repository layout
 
 - `src/anime_trivia_automation/capture.py` — DXcam ownership and CUDA frame-change/stability gating.

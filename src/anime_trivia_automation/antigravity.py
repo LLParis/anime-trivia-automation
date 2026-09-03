@@ -326,6 +326,17 @@ class AntigravityProvider:
     def availability(self) -> AntigravityAvailability:
         return self._availability
 
+    def mark_unavailable(self, detail: str) -> None:
+        """Park the lane after a failed real-clue preflight."""
+
+        self._availability = AntigravityAvailability(
+            phase="unavailable",
+            available=False,
+            model=self._config.model_slug,
+            detail=detail,
+            checked_at=time.time(),
+        )
+
     async def preflight(
         self, *, force: bool = False, deadline: float | None = None
     ) -> AntigravityAvailability:

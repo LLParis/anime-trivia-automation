@@ -340,6 +340,10 @@ class TypingConfig:
     # be spaced by at least five seconds while the card remains green.
     max_guesses_per_round: int = 3
     guess_gap_seconds: float = 5.2
+    # Exercise the production writer on the real Discord composer at every
+    # live launch and refuse to arm if it fails.
+    live_probe_at_launch: bool = True
+    live_probe_wait_seconds: float = 90.0
 
 
 @dataclass(frozen=True)
@@ -620,6 +624,10 @@ def load_config(path: str | Path) -> AppConfig:
             typing_raw.get("restore_previous_foreground", True)
         ),
         max_guesses_per_round=int(typing_raw.get("max_guesses_per_round", 3)),
+        live_probe_at_launch=bool(typing_raw.get("live_probe_at_launch", True)),
+        live_probe_wait_seconds=float(
+            typing_raw.get("live_probe_wait_seconds", 90.0)
+        ),
         guess_gap_seconds=float(typing_raw.get("guess_gap_seconds", 5.2)),
     )
 
@@ -1170,6 +1178,8 @@ def validate_config(config: AppConfig) -> None:
         )
     if not 0 <= config.typing.activation_idle_ms <= 5000:
         raise ValueError("typing.activation_idle_ms must be between 0 and 5000")
+    if not 5.0 <= config.typing.live_probe_wait_seconds <= 600.0:
+        raise ValueError("typing.live_probe_wait_seconds must be between 5 and 600")
     if not 1 <= config.typing.max_guesses_per_round <= 5:
         raise ValueError("typing.max_guesses_per_round must be between 1 and 5")
     if not 5.0 <= config.typing.guess_gap_seconds <= 10.0:

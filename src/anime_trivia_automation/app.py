@@ -2066,6 +2066,9 @@ class AnimeTriviaAutomation:
                     event_id="antigravity-unavailable",
                 )
 
+        self._preflight_solvers_with_a_real_clue()
+        self._preflight_composer()
+
         self._dispatcher.start()
         self._processor_thread.start()
         self._emergency_stop.start()
@@ -2111,6 +2114,139 @@ class AnimeTriviaAutomation:
             self._emergency_stop.stop()
         except RuntimeError:
             LOGGER.debug("Emergency-stop listener was already stopped", exc_info=True)
+
+    # A clue whose answer is fixed and famous: a lane that cannot answer it
+    # within its live deadline is not a lane, whatever its preflight said.
+    PREFLIGHT_CLUE = '"Dedicate your hearts!"'
+    PREFLIGHT_ANSWER = "attack on titan"
+
+    def _preflight_solvers_with_a_real_clue(self) -> None:
+        """Every enabled cloud lane must answer a known clue before capture starts."""
+
+        working: list[str] = []
+        if self._config.antigravity.enabled and self._antigravity.availability.available:
+            self._status.emit(
+                "LOADING",
+                title="Testing the account solver on a real clue",
+                detail="Antigravity must answer a known quote within its live deadline",
+                readiness="unknown",
+            )
+            started = time.perf_counter()
+            try:
+                result = asyncio.run(
+                    self._antigravity.resolve(
+                        AntigravityRequest(
+                            clue=self.PREFLIGHT_CLUE,
+                            expected_answer_type="anime_title",
+                            prompt_kind="text",
+                            deadline=time.perf_counter()
+                            + float(self._config.antigravity.total_timeout_seconds),
+                        )
+                    )
+                )
+                answer = normalize_question(result.answer or "")
+            except Exception as exc:
+                result = None
+                answer = ""
+                LOGGER.warning("Antigravity real-clue preflight raised %s", type(exc).__name__)
+            elapsed = (time.perf_counter() - started) * 1000.0
+            if result is not None and result.accepted and self.PREFLIGHT_ANSWER in answer:
+                LOGGER.info("Antigravity answered the preflight clue in %.0f ms", elapsed)
+                working.append("antigravity")
+            else:
+                detail = (
+                    f"Antigravity did not answer a known clue ({result.detail if result else 'error'}; "
+                    f"{elapsed:.0f} ms)"
+                )
+                LOGGER.warning(detail)
+                self._antigravity.mark_unavailable(detail)
+                self._status.emit(
+                    "ATTENTION",
+                    title="Account solver failed its real-clue test",
+                    detail=detail,
+                    readiness="unknown",
+                    event_id="antigravity-preflight-failed",
+                )
+        if self._config.gemini.enabled and self._gemini.availability.available:
+            self._status.emit(
+                "LOADING",
+                title="Testing the Gemini API on a real clue",
+                detail="The API lane must answer a known quote within its live deadline",
+                readiness="unknown",
+            )
+            started = time.perf_counter()
+            try:
+                gemini_result = self._run_gemini_coroutine(
+                    self._gemini.resolve(
+                        GeminiRequest(
+                            clue=self.PREFLIGHT_CLUE,
+                            expected_answer_type="anime_title",
+                            deadline=time.perf_counter()
+                            + float(self._config.gemini.text_timeout_seconds),
+                        )
+                    ),
+                    timeout=float(self._config.gemini.text_timeout_seconds) + 1.0,
+                )
+                answer = normalize_question(gemini_result.answer or "")
+            except Exception as exc:
+                gemini_result = None
+                answer = ""
+                LOGGER.warning("Gemini real-clue preflight raised %s", type(exc).__name__)
+            elapsed = (time.perf_counter() - started) * 1000.0
+            if (
+                gemini_result is not None
+                and gemini_result.accepted
+                and self.PREFLIGHT_ANSWER in answer
+            ):
+                LOGGER.info("Gemini API answered the preflight clue in %.0f ms", elapsed)
+                working.append("gemini")
+            else:
+                detail = (
+                    "Gemini API did not answer a known clue "
+                    f"({gemini_result.detail if gemini_result else 'error'}; {elapsed:.0f} ms)"
+                )
+                LOGGER.warning(detail)
+                self._gemini.mark_unavailable(detail)
+                self._status.emit(
+                    "ATTENTION",
+                    title="Gemini API failed its real-clue test",
+                    detail=detail,
+                    readiness="unknown",
+                    event_id="gemini-preflight-failed",
+                )
+        if self._config.novel.enabled and self._novel.ready_for_resolve:
+            working.append("qwen")
+        if not working:
+            raise RuntimeError(
+                "No solver can answer a real clue right now; refusing to arm. "
+                "Check the Antigravity account (agy models), the API key, or enable Qwen."
+            )
+        LOGGER.info("Solvers that answered a real clue at launch: %s", ", ".join(working))
+
+    def _preflight_composer(self) -> None:
+        """Refuse to arm unless the production writer works on the live composer."""
+
+        if not self._config.typing.enabled or not self._config.typing.live_probe_at_launch:
+            return
+        self._status.emit(
+            "LOADING",
+            title="Testing the Discord composer",
+            detail="Pause typing for 2 s; the writer types and erases 'ok' in #anime-chat",
+            readiness="unknown",
+        )
+        result = self._keyboard.live_probe(
+            wait_seconds=float(self._config.typing.live_probe_wait_seconds)
+        )
+        if not result.ok:
+            raise RuntimeError(f"Discord composer probe failed: {result.detail}")
+        self._keyboard.adopt_measured_lag(result.value_lag_ms)
+        LOGGER.info("Live composer probe passed: %s", result.detail)
+        self._status.emit(
+            "LOADING",
+            title="Discord composer verified",
+            detail=result.detail,
+            readiness="unknown",
+        )
 
     def _shutdown_resolution_workers(self) -> None:
         with self._resolution_shutdown_lock:

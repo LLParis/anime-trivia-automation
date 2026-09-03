@@ -9,7 +9,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -469,6 +469,17 @@ class ActivePromptState:
             return self._signature
 
 
+@dataclass(frozen=True)
+class ComposerProbeResult:
+    """Outcome of exercising the production writer on the real Discord editor."""
+
+    ok: bool
+    detail: str
+    find_ms: float = 0.0
+    value_lag_ms: float = 0.0
+    clear_ms: float = 0.0
+
+
 class SafeKeyboardExecutor:
     """Atomically own one complete Discord answer and submit only on green."""
 
@@ -511,6 +522,101 @@ class SafeKeyboardExecutor:
     @staticmethod
     def _suppression_key(task: AnswerTask) -> str:
         return task.round_token or task.prompt_signature
+
+    def live_probe(
+        self, *, wait_seconds: float = 90.0, idle_ms: int = 2000, text: str = "ok"
+    ) -> ComposerProbeResult:
+        """Exercise the real composer with the production writer; never press Enter.
+
+        Every lost quiz on 2026-09-02 was a writer that passed unit tests
+        against a fake editor and failed against Discord. This runs at launch
+        against the live window: raise Discord once the operator is idle, find
+        and focus the composer, write ``text`` with the same SendInput path used
+        for answers, wait for the accessibility value to catch up, erase it with
+        the same select-all/backspace path, and hand focus back. A failure here
+        must stop the launch rather than be discovered mid-quiz.
+        """
+
+        deadline = time.monotonic() + max(1.0, wait_seconds)
+        while self._guard.idle_milliseconds() < idle_ms:
+            if time.monotonic() >= deadline or self._stop_event.is_set():
+                return ComposerProbeResult(
+                    False, "operator kept typing; composer probe could not run"
+                )
+            time.sleep(0.25)
+        target = self._guard.expected_window()
+        if target is None:
+            return ComposerProbeResult(False, "no unique Discord window is open")
+        previous = self._guard.current()
+        displaced = previous is not None and previous.hwnd != target.hwnd
+        if displaced and not self._guard.activate(target.hwnd):
+            return ComposerProbeResult(False, "Windows refused to raise Discord")
+        try:
+            started = time.perf_counter()
+            composer = self._composer_locator.find(target.hwnd, target.process_id)
+            find_ms = (time.perf_counter() - started) * 1000.0
+            if composer is None:
+                return ComposerProbeResult(
+                    False, "the #anime-chat composer was not found; open the channel", find_ms
+                )
+            if composer.value() != "":
+                return ComposerProbeResult(
+                    False, "the composer already holds text; clear it and relaunch", find_ms
+                )
+            if not composer.focused():
+                composer.set_focus()
+                settle = time.monotonic() + 0.3
+                while time.monotonic() < settle and not composer.focused():
+                    time.sleep(0.01)
+            if not composer.focused():
+                return ComposerProbeResult(False, "the composer would not take focus", find_ms)
+            sent_at = time.perf_counter()
+            self._text_input.send_text(text)
+            lag_deadline = time.monotonic() + 2.0
+            value = composer.value()
+            while value != text and time.monotonic() < lag_deadline:
+                time.sleep(0.005)
+                value = composer.value()
+            value_lag_ms = (time.perf_counter() - sent_at) * 1000.0
+            if value != text:
+                self._keystroke_clear(composer, value) if value else None
+                return ComposerProbeResult(
+                    False,
+                    f"typed text never appeared in the composer (saw {value!r})",
+                    find_ms,
+                    value_lag_ms,
+                )
+            clear_started = time.perf_counter()
+            if not self._keystroke_clear(composer, text):
+                return ComposerProbeResult(
+                    False, "select-all/backspace did not clear the composer", find_ms, value_lag_ms
+                )
+            clear_ms = (time.perf_counter() - clear_started) * 1000.0
+            return ComposerProbeResult(
+                True,
+                f"composer OK: find {find_ms:.0f} ms, value lag {value_lag_ms:.0f} ms, clear {clear_ms:.0f} ms",
+                find_ms,
+                value_lag_ms,
+                clear_ms,
+            )
+        except Exception as exc:
+            LOGGER.exception("Live composer probe failed")
+            return ComposerProbeResult(False, f"composer probe raised {type(exc).__name__}")
+        finally:
+            if displaced and previous is not None:
+                try:
+                    self._guard.activate(previous.hwnd)
+                except Exception:
+                    LOGGER.debug("Could not restore the previous window after the probe")
+
+    def adopt_measured_lag(self, value_lag_ms: float) -> None:
+        """Widen the settle window to several measured lags, never below config."""
+
+        measured = max(0.3, min(2.0, value_lag_ms / 1000.0 * 5.0))
+        current = float(self._config.composer_settle_timeout_seconds)
+        if measured > current:
+            self._config = replace(self._config, composer_settle_timeout_seconds=measured)
+            LOGGER.info("Composer settle window widened to %.2f s from the live probe", measured)
 
     def suppress_task(self, task: AnswerTask, reason: str) -> None:
         with self._suppression_lock:

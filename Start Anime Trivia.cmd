@@ -17,11 +17,25 @@ if not exist "config.json" (
   exit /b 1
 )
 
-echo Loading local OCR, reviewed history, account Gemini 3.8, and the controlled Developer API fallback. Capture starts after ARMED.
-echo Any current red or green card can be handled, even if you start mid-quiz.
-echo A verified answer is staged as one complete value only after the same card turns green.
-echo If Chrome is in front when the card turns green, Discord is raised once you pause typing,
-echo the answer is sent, and focus returns to Chrome. Log + ledger: runtime\logs, runtime\round_ledger.jsonl.
+set DIRTY=
+where git >nul 2>&1 && (
+  for /f "delims=" %%L in ('git status --porcelain src tests 2^>nul') do set DIRTY=1
+)
+if defined DIRTY (
+  echo.
+  echo WARNING: src/ or tests/ has UNCOMMITTED changes. The code about to run is not the tested,
+  echo committed code. Commit or revert before a quiz. Press any key to launch anyway.
+  git status --short src tests
+  pause >nul
+)
+for /f "delims=" %%C in ('git log -1 --format^=%%h 2^>nul') do echo Running commit %%C
+
+echo Startup checks: OCR warm-up, every solver must answer a real clue, and the writer types and
+echo erases "ok" in the live #anime-chat composer (pause typing for 2 seconds when asked).
+echo The app refuses to arm if any of those fail. Capture starts after ARMED.
+echo Any red or green card is answered, even mid-quiz. The answer is typed as real input at green;
+echo if Chrome is in front, Discord is raised once you pause typing and focus is returned after.
+echo Afterwards: ".venv\Scripts\anime-trivia.exe --report" prints what happened in every round.
 echo Press F12 to stop.
 echo.
 ".venv\Scripts\anime-trivia.exe" --config "config.json"

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .app import AnimeTriviaAutomation, inspect_image, print_inspection
 from .config import load_config
+from .report import write_quiz_report
 from .singleton import WorkerAlreadyRunningError, WorkerMutex
 from .status import NullStatus, OperatorStatus
 from .utils import configure_logging
@@ -58,6 +59,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow the large local VLM slow path during --inspect-image",
     )
+    parser.add_argument(
+        "--report",
+        nargs="?",
+        const=1,
+        type=int,
+        metavar="RUNS",
+        help="Print a per-round report of the last RUNS launches from the ledger and exit",
+    )
     return parser
 
 
@@ -76,6 +85,18 @@ def main() -> int:
         return 0
 
     config = load_config(args.config)
+    if args.report is not None:
+        if config.runtime.ledger_path is None or not config.runtime.ledger_path.exists():
+            print("No round ledger exists yet.")
+            return 1
+        text, out = write_quiz_report(
+            config.runtime.ledger_path,
+            config.runtime.log_dir or config.runtime.ledger_path.parent,
+            runs=int(args.report),
+        )
+        print(text)
+        print(f"report: {out}")
+        return 0
     configure_logging(
         config.runtime.log_level,
         log_dir=None if (args.validate_config or args.inspect_image) else config.runtime.log_dir,
